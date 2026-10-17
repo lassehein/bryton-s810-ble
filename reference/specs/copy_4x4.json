@@ -1,0 +1,124 @@
+{
+ "name": "Test_4x4_Copy",
+ "description": "",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 600,
+   "power": [
+    40,
+    50
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 240,
+   "power": [
+    110,
+    120
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 240,
+   "power": [
+    40,
+    50
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 240,
+   "power": [
+    110,
+    120
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 240,
+   "power": [
+    40,
+    50
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 240,
+   "power": [
+    110,
+    120
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 240,
+   "power": [
+    40,
+    50
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 240,
+   "power": [
+    110,
+    120
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 600,
+   "power": [
+    40,
+    50
+   ],
+   "cadence": [
+    80,
+    90
+   ],
+   "name": "Step Name"
+  }
+ ],
+ "correct_cadence": false
+}

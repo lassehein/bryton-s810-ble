@@ -1,0 +1,88 @@
+{
+ "name": "Test_CadPre",
+ "description": "CadPre leading JSON entry 11/101",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "cadence": [
+    41,
+    111
+   ],
+   "name": "s1"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "cadence": [
+    52,
+    122
+   ],
+   "name": "s2"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "cadence": [
+    63,
+    133
+   ],
+   "name": "s3"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "cadence": [
+    74,
+    144
+   ],
+   "name": "s4"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "cadence": [
+    85,
+    155
+   ],
+   "name": "s5"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "cadence": [
+    96,
+    166
+   ],
+   "name": "s6"
+  }
+ ],
+ "json_leading": [
+  11,
+  101
+ ]
+}

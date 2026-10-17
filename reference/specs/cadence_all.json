@@ -1,0 +1,66 @@
+{
+ "name": "Test_CadAll",
+ "description": "Corrected cadence: first, after power, consecutive",
+ "steps": [
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "cadence": [
+    85,
+    95
+   ],
+   "name": "c85-95"
+  },
+  {
+   "kind": "rest",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p-only"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    80,
+    90
+   ],
+   "cadence": [
+    100,
+    110
+   ],
+   "name": "c100-110"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "cadence": [
+    70,
+    80
+   ],
+   "name": "c70-80"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p-only"
+  }
+ ],
+ "cadence_fix": {
+  "dummy_seconds": 20
+ }
+}

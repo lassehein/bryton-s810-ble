@@ -1,0 +1,33 @@
+{
+ "name": "Test_Dist",
+ "description": "Distance step 100 m between two 20 s steps",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "name": "time"
+  },
+  {
+   "kind": "active",
+   "meters": 100,
+   "power": [
+    70,
+    80
+   ],
+   "name": "100m"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "time2"
+  }
+ ]
+}

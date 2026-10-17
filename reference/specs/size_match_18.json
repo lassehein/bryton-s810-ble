@@ -1,0 +1,168 @@
+{
+ "name": "Test_Gen18_Pad_01",
+ "description": "",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 1200,
+   "power": [
+    45,
+    55
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "active",
+   "seconds": 60,
+   "power": [
+    165,
+    175
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "rest",
+   "seconds": 60,
+   "power": [
+    20,
+    30
+   ],
+   "name": "Step Name"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 900,
+   "power": [
+    45,
+    55
+   ],
+   "name": "Step Name"
+  }
+ ]
+}

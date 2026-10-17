@@ -1,0 +1,67 @@
+{
+ "name": "Test_Targets",
+ "description": "Fixed and range targets: FTP, MHR, LTHR, speed, with cadence",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    75,
+    75
+   ],
+   "name": "ftp75"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "mhr": [
+    60,
+    70
+   ],
+   "name": "mhr60-70"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "lthr": [
+    85,
+    95
+   ],
+   "name": "lthr85-95"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "speed": [
+    25,
+    30
+   ],
+   "name": "spd25-30"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "speed": [
+    27,
+    27
+   ],
+   "name": "spd27"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "mhr": [
+    65,
+    65
+   ],
+   "cadence": [
+    85,
+    95
+   ],
+   "name": "mhr65c"
+  }
+ ],
+ "cadence_fix": {
+  "dummy_seconds": 20
+ }
+}

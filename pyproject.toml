@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bryton-s810-ble"
+version = "0.1.0"
+description = "Write workouts to a Bryton Rider S810 over Bluetooth LE, plus an MCP server for Claude"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["bleak>=0.22"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]
+dev = ["pytest"]
+
+[project.scripts]
+bryton-agent = "bryton.agent:main"
+bryton-mcp = "bryton.mcp_server:main"
+
+[tool.setuptools]
+packages = ["bryton"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,14 @@
+*.pklg
+*.pkl
+__pycache__/
+.venv/
+captures/
+backup/
+.pytest_cache/
+probe.log
+probe18.log
+write.log
+*.egg-info/
+build/
+dist/
+.DS_Store

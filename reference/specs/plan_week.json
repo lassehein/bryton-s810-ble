@@ -1,0 +1,35 @@
+{
+ "name": "Test_PlanWeek",
+ "description": "Plan test: today, +2 and +4 days",
+ "plan": [
+  "today",
+  "+2",
+  "+4"
+ ],
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ]
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    75,
+    85
+   ]
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ]
+  }
+ ]
+}

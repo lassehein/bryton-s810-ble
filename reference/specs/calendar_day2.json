@@ -1,0 +1,11 @@
+{
+ "name": "Test_CalDay2",
+ "description": "Second calendar entry test",
+ "plan": ["+2"],
+ "steps": [
+  {"kind": "active", "seconds": 20, "power": [70, 80], "cadence": [80, 90], "name": "c80-90"},
+  {"kind": "rest", "seconds": 20, "power": [50, 60], "name": "p-only"},
+  {"kind": "cooldown", "seconds": 20, "power": [50, 60], "cadence": [80, 90], "name": "c80-90"}
+ ],
+ "cadence_fix": {"dummy_seconds": 20}
+}

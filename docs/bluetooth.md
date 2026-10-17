@@ -1,0 +1,100 @@
+# Bryton Rider S810: Bluetooth LE protocol
+
+How the Bryton Active app writes a workout to the device, as observed from iPhone traffic (PacketLogger
+captures) and verified by writing files from a Mac. Everything here is reverse-engineered from one device
+(firmware `IV049.002.0008.04`) and may differ on other models or firmware. Items marked *(unverified)* were
+not confirmed on the device.
+
+Reference implementation: [`bryton/protocol.py`](../bryton/protocol.py) (framing),
+[`bryton/ble.py`](../bryton/ble.py) (session). Real traffic: [`reference/capture_transfer_window.txt`](../reference/capture_transfer_window.txt).
+
+## Connecting
+
+- The device advertises as `RiderS810` (service `0x2014`). A device that is connected to a phone stops
+  advertising, so switch Bluetooth off on the phone/tablet first. A device in USB mode is not reachable.
+- The ATT MTU must be at least 153 (150-byte packets plus 3 bytes ATT header). CoreBluetooth/bleak negotiates this.
+- macOS shows no MAC addresses, only per-host UUIDs. Select the device by name.
+
+## Characteristics
+
+| Handle | UUID | Role | Properties |
+|---|---|---|---|
+| `0x0d` | `454d1188-a122-058d-9b42-9d0f3772af82` | file channel (device info, file transfer) | write-without-response, write, notify |
+| `0x10` | `454d2288-a122-058d-9b42-9d0f3772af82` | control / handshake | write, notify |
+| `0x18` | `50b81188-c2de-a994-094d-340090726877` | command channel (request / reply) | write, notify |
+
+Subscribe to notifications on all three before writing.
+
+## Handshake
+
+Write `08 08` + ASCII `12345678ios` to `0x10`. The device answers `08 28 02` on `0x10`. The string is a fixed
+value in the app.
+
+## `0x18` command frames
+
+`<cmd> <sub> [payload] <checksum>`, where the checksum is the sum of all previous bytes modulo 256.
+
+- `<cmd> 04` is a request, the device answers `<cmd> 05 ...`.
+- `<cmd> 0a` is an acknowledgement (2 bytes, no checksum). The app acknowledges every notification longer than
+  two bytes with `<cmd> 0a`; the device's own 2-byte `0a` frames get no reply.
+- Settings queries seen in the capture: `21` power zones, `22` heart-rate zones, `23` LTHR zones, `1e` profile,
+  `41` language, `53` time. They are not needed for uploading. `bryton_query_probe.py` only sends a
+  whitelist of read-only queries.
+
+## Uploading a workout
+
+A workout is two files, FIT first, then JSON (see [file-formats.md](file-formats.md)). The file name on the device
+comes from the `name` field of the JSON, not from the FIT.
+
+```
+0x10  08 08 "12345678ios"            -> 08 28 02            handshake
+0x18  46 04 4a                       -> 46 05 ...           query; acknowledge with 46 0a
+0x18  46 01 01 <T> <sum>             -> 46 0a               begin session
+for each file (FIT, then JSON):
+  0x10  10 00 09  (FIT) | 10 00 0f (JSON)  -> 10 20 02       prepare
+  0x10  10 40 05 01 f4
+  0x0d  start packet
+  0x0d  data packets                 (write without response, ~1-2 ms apart)
+  0x0d  end packet                   (write with response)
+        device notifies on 0x10: 10 40 03 00 00 = accepted   (10 40 01 00 00 = rejected)
+0x18  46 01 00 <T> <sum>             -> 46 0a               end session
+```
+
+`<T>` selects the destination: `00` = workout list (`System/Plan/Cycling/`), `01` = calendar
+(`Workout/calendar/<YYYYMMDD>/`, the day comes from the `plan` field of the JSON). Begin frames are
+`46 01 01 00 48` / `46 01 01 01 49`, end frames `46 01 00 00 47` / `46 01 00 01 48`.
+
+The meaning of the `09` / `0f` argument is unknown; it looks like a file type. Always send the end-session frame,
+even after an error, otherwise the device stays in transfer mode.
+
+### Packets on `0x0d`
+
+The transferred *body* is `00 00 00 00` + file length (u32, big-endian) + the file.
+
+- **Start packet** (7 bytes): `00 00 00 <n> <last> 10 08`, where `n` is the number of data packets and `last` is
+  the payload length of the **last** data packet. A wrong `last` makes the device reject the file.
+- **Data packets**: sequence number (u16, big-endian, starting at 1) followed by up to **148** bytes of body.
+- **End packet** (7 bytes): `<n+1 as u16> 00 <sum of all body bytes as u32, big-endian>`.
+
+### Timing pitfall
+
+A reply can arrive while the write call that triggered it is still running. Record the position in the
+notification list *before* writing, then wait for a reply after that position.
+
+### Calendar uploads replace the whole calendar
+
+Sending one calendar workout deletes every other calendar entry on the device. To plan a week, send all days
+in a single session (repeat the per-file steps for every FIT/JSON pair between begin and end).
+Workouts in the workout list are not affected.
+
+## Where files land
+
+The device first writes an upload to `Workout/saved_temp/temp0.*` (calendar: `Workout/calendar_temp/temp0.*`)
+and then files it under the JSON name. This happens without any action on the device. The drive `BRYTON`
+shows up over USB mass storage; the device cannot be uploaded to over Bluetooth while in USB mode.
+
+## Safety
+
+- Uploading a name that exists replaces that workout without a prompt.
+- The device list cannot be read over Bluetooth. Keep your own list, or look at the USB drive.
+- Back up `System/Plan/Cycling/` and `Workout/` over USB before experimenting.

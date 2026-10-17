@@ -1,0 +1,109 @@
+# MCP server for Claude Desktop and Claude Code
+
+Describe a training in plain language; Claude turns it into steps, shows a preview, and (after you confirm)
+uploads it to the S810 over Bluetooth.
+
+## Architecture
+
+```
+Claude Desktop / Claude Code  --stdio-->  bryton-mcp   (builds files, keeps a local calendar copy)
+                                              |  HTTP, 127.0.0.1 only, token
+                                              v
+                                          bryton-agent (Bluetooth upload)  --BLE-->  S810
+```
+
+The Bluetooth part is a separate process so that a crash or a missing permission cannot take the MCP server
+down. The MCP server starts the agent itself on the first upload; this works from Claude Desktop.
+If macOS refuses Bluetooth to the process (CoreBluetooth aborts with exit 134 / SIGABRT, or the server tells you
+the agent could not be started), start `bryton-agent` by hand in a Terminal that may use Bluetooth
+(System Settings > Privacy & Security > Bluetooth).
+
+The agent listens on `127.0.0.1` only and requires the token in `~/.bryton_s810/agent_token` (created at start,
+readable only by you).
+
+## Install
+
+```bash
+python3 -m venv ~/.venvs/bryton && source ~/.venvs/bryton/bin/activate
+pip install -e ".[mcp]"               # from a checkout of this repository
+# or straight from GitHub (replace OWNER; a private repository needs your GitHub login):
+pip install "bryton-s810-ble[mcp] @ git+https://github.com/OWNER/bryton-s810-ble.git"
+```
+
+Optional settings in `~/.bryton_s810/config.json` (used for the preview and for name safety):
+
+```json
+{"ftp": 220, "mhr": 188, "lthr": 154, "known_workouts": ["4x4", "MyOldWorkout"]}
+```
+
+- `ftp`, `mhr`, `lthr` only convert percentages to watts/bpm in the preview. The device uses its own zones.
+- `known_workouts`: names that already exist on the device. The server will not overwrite them without `overwrite`.
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (use the absolute path of the
+venv script, find it with `which bryton-mcp`), then quit and restart Claude Desktop:
+
+```json
+{"mcpServers": {"bryton-s810": {"command": "/Users/you/.venvs/bryton/bin/bryton-mcp"}}}
+```
+
+### Claude Code
+
+```bash
+claude mcp add bryton-s810 -- /Users/you/.venvs/bryton/bin/bryton-mcp
+```
+
+Claude Code started from a Terminal inherits that Terminal's Bluetooth permission, so the MCP server's
+automatic agent start should work there (untested). Otherwise start `bryton-agent` yourself.
+
+## Use
+
+1. Phone and tablet: Bluetooth off. S810 on, not connected via USB.
+2. In Claude: *"Plan 4x4 minutes at 110-120 % FTP with 4 minutes rest, cadence 90-100, upload it as VO2_4x4."*
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| `preview_workout` | Build and show the workout as text. No device access. |
+| `upload_workout` | Upload to the workout list, or to the calendar with `date`. |
+| `list_known_workouts` | Names this server knows to be on the device. |
+| `list_calendar` | The calendar this server last sent. |
+| `remove_calendar_entry` | Remove a planned day and resend the calendar. |
+| `agent_status` | Is the Bluetooth agent reachable? |
+
+### Steps
+
+```json
+[{"kind": "warmup", "minutes": 10, "power": [50, 60]},
+ {"repeat": 4, "steps": [
+   {"kind": "active", "minutes": 4, "power": [110, 120], "cadence": [90, 100], "name": "VO2"},
+   {"kind": "rest", "minutes": 4, "power": [40, 50]}]},
+ {"kind": "cooldown", "minutes": 10, "power": [40, 50]}]
+```
+
+- Duration: one of `minutes`, `seconds`, `km`, `meters`.
+- Target: exactly one of `power` (% FTP), `mhr` (% max HR), `lthr` (% LTHR), `speed` (km/h). A number is a fixed
+  target, `[low, high]` a range. Optional `cadence` (rpm) on top. A step with only `cadence` is a cadence step.
+- `name`: up to 9 characters. Workout name: 1-20 characters of letters, digits, `_`, `-`.
+- Umlauts in descriptions are transliterated (`ä` becomes `ae`).
+
+### Safety rules built into `upload_workout`
+
+- The device list cannot be read over Bluetooth, and a name that exists is replaced without warning.
+  Claude must ask you whether the name is new (`name_confirmed_new`) or may be replaced (`overwrite`).
+- Calendar uploads replace the **whole** device calendar. The server keeps a copy of everything it planned
+  (`~/.bryton_s810/calendar/`) and resends all days from today on. Entries planned in the Bryton app are not
+  known to the server and disappear. Claude must get your agreement (`calendar_replace_ok`).
+- A failed upload leaves the local copy unchanged and never leaves the device in transfer mode.
+
+## Troubleshooting
+
+- *"S810 not found"*: it is connected to a phone/tablet, in USB mode, or switched off. Switch Bluetooth off
+  on the phone and reconnect nothing.
+- *Exit 134 / SIGABRT*, or "agent could not be started": the process has no Bluetooth permission. Run
+  `bryton-agent` from a Terminal that has it and leave it open.
+- *MCP server missing in Claude Desktop*: use the absolute path to the venv's `bryton-mcp`, then restart
+  Claude Desktop completely (quit, not just close the window). Logs: `~/Library/Logs/Claude/mcp*.log`.
+- Agent log: `~/.bryton_s810/agent.log`, upload logs: `~/.bryton_s810/logs/`.

@@ -1,0 +1,59 @@
+{
+ "name": "Test_CadMix",
+ "description": "Mixed: cadence only on steps 2 and 4",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p-only"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "cadence": [
+    85,
+    95
+   ],
+   "name": "c85-95"
+  },
+  {
+   "kind": "rest",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p-only"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    80,
+    90
+   ],
+   "cadence": [
+    100,
+    110
+   ],
+   "name": "c100-110"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p-only"
+  }
+ ]
+}

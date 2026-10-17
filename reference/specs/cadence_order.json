@@ -1,0 +1,74 @@
+{
+ "name": "Test_CadOrder",
+ "description": "target_high before target_low, no shift correction",
+ "correct_cadence": false,
+ "high_first": true,
+ "steps": [
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "name": "none1"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "cadence": [
+    85,
+    95
+   ],
+   "name": "c85-95"
+  },
+  {
+   "kind": "rest",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "none2"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    80,
+    90
+   ],
+   "cadence": [
+    100,
+    110
+   ],
+   "name": "c100-110"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ],
+   "cadence": [
+    70,
+    80
+   ],
+   "name": "c70-80"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "none3"
+  }
+ ]
+}

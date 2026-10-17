@@ -1,0 +1,33 @@
+{
+ "name": "Test_PlanToday",
+ "description": "Plan test: scheduled for today",
+ "plan": [
+  "today"
+ ],
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ]
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "power": [
+    70,
+    80
+   ]
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ]
+  }
+ ]
+}

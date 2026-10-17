@@ -1,0 +1,54 @@
+{
+ "name": "Test_CadPrimary",
+ "description": "Cadence as FIT primary target (like the Bryton web app)",
+ "steps": [
+  {
+   "kind": "warmup",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p50-60"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "target": "cadence",
+   "cadence": [
+    61,
+    71
+   ],
+   "name": "c61-71"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "target": "cadence",
+   "cadence": [
+    92,
+    102
+   ],
+   "name": "c92-102"
+  },
+  {
+   "kind": "active",
+   "seconds": 20,
+   "target": "cadence",
+   "cadence": [
+    113,
+    123
+   ],
+   "name": "c113-123"
+  },
+  {
+   "kind": "cooldown",
+   "seconds": 20,
+   "power": [
+    50,
+    60
+   ],
+   "name": "p50-60"
+  }
+ ]
+}
