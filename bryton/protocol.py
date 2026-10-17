@@ -41,6 +41,27 @@ def build_transfer(data, start_byte5=None, chunk=DEFAULT_CHUNK):
     return start, packets, end
 
 
+MAX_CHUNK_PAYLOAD = 6922  # route capture: chunks of 47 packets, body = 8-byte header + 6922 bytes
+
+
+def build_chunks(data, max_payload=MAX_CHUNK_PAYLOAD):
+    """Transfers for a file of any size: a list of (start, packets, end), one per chunk.
+
+    Every chunk body starts with offset (u32 BE) and total file length (u32 BE); a workout file is one
+    chunk with offset 0 (build_transfer). Larger files (routes) are sent as several chunks, each with
+    its own prepare command (`10 00 <kind>`), seen in the route capture: offsets 0, 6922, 13844, ...
+    """
+    out = []
+    for offset in range(0, max(len(data), 1), max_payload):
+        body = struct.pack(">II", offset, len(data)) + data[offset:offset + max_payload]
+        chunks = [body[i:i + DEFAULT_CHUNK] for i in range(0, len(body), DEFAULT_CHUNK)]
+        start = bytes([0, 0, 0, len(chunks), len(chunks[-1]), 0x10, 0x08])
+        packets = [struct.pack(">H", i) + c for i, c in enumerate(chunks, 1)]
+        end = struct.pack(">H", len(chunks) + 1) + b"\x00" + struct.pack(">I", sum(body) & 0xFFFFFFFF)
+        out.append((start, packets, end))
+    return out
+
+
 def reassemble(start, packets, end):
     """Inverse of build_transfer; validates framing, returns the file bytes."""
     n = start[3]
@@ -116,7 +137,7 @@ def end_transfer(target="plan"):
 
 
 BEGIN_TRANSFER, END_TRANSFER = begin_transfer(), end_transfer()
-PREPARE = {"fit": bytes.fromhex("100009"), "json": bytes.fromhex("10000f")}
+PREPARE = {"fit": bytes.fromhex("100009"), "json": bytes.fromhex("10000f"), "route": bytes.fromhex("10000b")}
 PARAMS = bytes.fromhex("10400501f4")
 PREPARE_REPLY = bytes.fromhex("102002")
 DONE_REPLY = bytes.fromhex("1040030000")
@@ -141,13 +162,50 @@ def plan_upload(transfers, target="plan"):
     return steps
 
 
+# --- Route upload (capture 2026-10-17): no 46 begin/end; file kind 0b in chunks, then the name via 0x31
+QUERY_31 = command(0x31, 0x04)
+NAME_BYTES_MAX = 32
+NAME_FRAME_BYTES = 16
+
+
+def name_frames(name):
+    """0x31 frames that carry the route name: header `31 01 00 <frames> <length> <sum>`, then data frames
+    `31 01 <i> <16 bytes, zero padded> <sum>`. The length is the name's UTF-8 length (at most 32)."""
+    raw = name.encode("utf-8")[:NAME_BYTES_MAX].decode("utf-8", "ignore").encode("utf-8")
+    parts = [raw[i:i + NAME_FRAME_BYTES] for i in range(0, len(raw), NAME_FRAME_BYTES)] or [b""]
+    frames = [command(0x31, 0x01, 0x00, len(parts) + 1, len(raw))]
+    frames += [command(0x31, 0x01, i, *p.ljust(NAME_FRAME_BYTES, b"\x00")) for i, p in enumerate(parts, 1)]
+    return frames
+
+
+def plan_route_upload(chunks, name):
+    """Steps (as plan_upload) for a route: every chunk is prepared and sent as kind 0b, then the name."""
+    steps = []
+    for start, packets, end in chunks:
+        steps.append(("0x10", PREPARE["route"], True, "prep"))
+        steps.append(("0x10", PARAMS, True, None))
+        steps.append(("0x0d", start, False, None))
+        steps += [("0x0d", pk, False, None) for pk in packets]
+        steps.append(("0x0d", end, True, "done"))
+    frames = name_frames(name)
+    steps.append(("0x18", QUERY_31, True, "q31"))
+    steps.append(("0x18", frames[0], True, "seq31_1"))
+    for i, frame in enumerate(frames[1:], 1):
+        steps.append(("0x18", frame, True, f"seq31_{i + 1}" if i + 1 < len(frames) else "ack31"))
+    return steps
+
+
 # Expected replies by name: (channel, predicate)
 EXPECT = {
     "q46": ("0x18", lambda d: d[:2] == b"\x46\x05"),
     "ack46": ("0x18", lambda d: d == b"\x46\x0a"),
     "prep": ("0x10", lambda d: d == PREPARE_REPLY),
     "done": ("0x10", lambda d: d == DONE_REPLY),
+    "q31": ("0x18", lambda d: d[:2] == b"\x31\x05"),
+    "ack31": ("0x18", lambda d: d == b"\x31\x0a"),
 }
+for _i in range(1, 6):  # the device asks for the next name frame: 31 02 <i> <sum>
+    EXPECT[f"seq31_{_i}"] = ("0x18", lambda d, _i=_i: d[:3] == bytes([0x31, 0x02, _i]))
 
 
 def reply_seen(seen, mark, name):

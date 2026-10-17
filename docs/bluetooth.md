@@ -87,6 +87,25 @@ Sending one calendar workout deletes every other calendar entry on the device. T
 in a single session (repeat the per-file steps for every FIT/JSON pair between begin and end).
 Workouts in the workout list are not affected.
 
+## Uploading a route
+
+Routes use no `46 01 ...` begin/end frames. The route file (gzip FIT, kind `0b`) is split into chunks of at most
+6922 data bytes (47 packets). **Every chunk is its own transfer**: `10 00 0b` -> `10 20 02`, `10 40 05 01 f4`, start,
+data, end packets, then the device answers `10 40 03 00 00`. The first 8 bytes of each chunk body are the chunk's
+offset in the file and the total file length (both u32 big-endian), instead of `00 00 00 00` + length of a workout
+file. The start packet is `00 00 00 <packets> <last packet payload> 10 08`, the end packet as for workouts.
+
+Then the name is sent on the command channel:
+
+```
+0x18  31 04 35                       -> 31 05 01 00 01 38      (acknowledge with 31 0a)
+0x18  31 01 00 <frames> <length> <sum>  -> 31 0a, 31 02 01 <sum>   header: frames = data frames + 1, length = name bytes (max 32)
+0x18  31 01 01 <16 bytes> <sum>         -> 31 0a, 31 02 02 <sum>   data frame 1 (name, zero padded)
+0x18  31 01 02 <16 bytes> <sum>         -> 31 0a                   data frame 2 (only for names over 16 bytes)
+```
+
+The device requests the next frame with `31 02 <n> <sum>`; acknowledge each notification with `31 0a`.
+
 ## Where files land
 
 The device first writes an upload to `Workout/saved_temp/temp0.*` (calendar: `Workout/calendar_temp/temp0.*`)

@@ -12,11 +12,12 @@ and plan them with Claude through an MCP server.
 - Upload a workout (FIT + JSON) to the device's workout list, or plan it for a day in the **calendar**.
 - Targets per step: % FTP, % max HR, % LTHR, speed, cadence; fixed value or range; time or distance steps.
 - Workout descriptions, which the device displays.
+- **Routes from GPX files**, shown on the device under `Courses > Route`.
 - Correct cadence ranges next to power/HR/speed targets (the device needs `target_high` before `target_low`, [details](docs/file-formats.md)).
 - An **MCP server** so Claude Desktop / Claude Code can turn "4x4 minutes at 110-120 % FTP" into a workout and upload it
   after you confirm.
 
-Not supported: reading the workout list over Bluetooth, deleting workouts, absolute watt/bpm targets.
+Not supported: reading the workout or route list over Bluetooth, deleting workouts or routes, absolute watt/bpm targets, Pace Pilot plans, turn-by-turn instructions in routes.
 
 ## Install
 
@@ -56,7 +57,7 @@ asyncio.run(upload(fit, js))                 # workout list
 ## Documentation
 
 - [Bluetooth protocol](docs/bluetooth.md): characteristics, handshake, upload sequence, packet format.
-- [File formats](docs/file-formats.md): FIT and JSON layout, targets, cadence quirk, calendar.
+- [File formats](docs/file-formats.md): FIT and JSON layout, targets, cadence, calendar, routes.
 - [MCP server](docs/mcp-server.md): setup, tools, safety rules, troubleshooting.
 - [Reverse-engineering notes](docs/reverse-engineering.md): how the protocol was found.
 

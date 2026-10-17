@@ -13,9 +13,10 @@ import time
 import urllib.error
 import urllib.request
 
-from bryton.service import (STATE_DIR, ServiceError, build, calendar_entries, calendar_save,
-                            calendar_text, calendar_with, calendar_without, known_names, load_config,
-                            preview_text, remember_name, resolve_date, upload_refusal)
+from bryton.service import (STATE_DIR, ServiceError, build, build_route, calendar_entries, calendar_save,
+                            calendar_text, calendar_with, calendar_without, known_names, known_routes,
+                            load_config, preview_text, remember_name, remember_route, resolve_date,
+                            route_refusal, route_text, upload_refusal)
 
 try:  # mcp >= 2
     from mcp.server.mcpserver import MCPServer as _Server
@@ -33,6 +34,8 @@ or "+N"); one call per training day. Every calendar upload replaces the WHOLE de
 this server's calendar (all days from today on, see list_calendar): workouts planned in the Bryton
 app disappear. Tell the user once and pass calendar_replace_ok=true after they agree. Without date
 the workout goes into the workout list.
+Routes: preview_route / upload_route take a GPX file (gpx_path); they appear on the device under Courses > Route and
+the route list cannot be read, so ask whether the name is new (name_confirmed_new) before uploading.
 Never upload without the user's explicit go-ahead."""
 
 STEPS_HELP = """steps: list of {"kind": "warmup|active|rest|cooldown", duration: one of "minutes", "seconds",
@@ -78,11 +81,26 @@ def _start_agent():
     return False
 
 
+AGENT_API_REQUIRED = 2  # bryton.agent.AGENT_API: 2 = routes supported
+
+
+class AgentOutdated(OSError):
+    pass
+
+
+def _check_agent_version(timeout=5):
+    api = _raw_agent("/health", timeout=timeout).get("api", 1)
+    if api < AGENT_API_REQUIRED:
+        raise AgentOutdated("an old Bluetooth agent is still running on this computer")
+
+
 def _agent(path, payload=None, timeout=150):
-    """Call the agent; if it is not running, start it once and retry."""
+    """Call the agent; if it is not running, start it once and retry. Refuses an outdated running agent."""
     try:
+        if payload is not None:
+            _check_agent_version()
         return _raw_agent(path, payload, timeout)
-    except urllib.error.HTTPError:
+    except (urllib.error.HTTPError, AgentOutdated):
         raise
     except (urllib.error.URLError, OSError):
         if os.environ.get("BRYTON_NO_AUTOSTART") or not _start_agent():
@@ -101,6 +119,15 @@ def _raw_agent(path, payload=None, timeout=150):
     req = urllib.request.Request(url, data=data, headers=headers, method="POST" if data else "GET")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read())
+
+
+OUTDATED_HINT = ("An old Bluetooth agent (started before the last update) is still running and cannot do this. "
+                 "Stop it (Ctrl+C in its Terminal, or `pkill -f bryton.agent; pkill -f bryton_agent`) and try again; "
+                 "the server then starts a fresh one. Nothing was sent to the device.")
+
+
+def _agent_hint(error):
+    return OUTDATED_HINT if isinstance(error, AgentOutdated) else AGENT_HINT
 
 
 AGENT_HINT = ("The Bluetooth agent is not running and could not be started automatically (see "
@@ -131,8 +158,8 @@ def upload_workout(name: str, steps: list, description: str = "", date: str = ""
         result = _agent("/upload", {"name": name, "fit": base64.b64encode(fit).decode(),
                                     "json": base64.b64encode(js).decode(),
                                     "target": "plan"})
-    except (urllib.error.URLError, OSError):
-        return "Not uploaded. " + AGENT_HINT
+    except (urllib.error.URLError, OSError) as e:
+        return "Not uploaded. " + _agent_hint(e)
     if not result.get("ok"):
         return f"Upload failed: {result.get('message')}. Nothing was changed on the device."
     remember_name(name)
@@ -148,8 +175,8 @@ def _send_calendar(entries):
                                     "workouts": [{"fit": base64.b64encode(f).decode(),
                                                   "json": base64.b64encode(j).decode()}
                                                  for _d, _n, f, j in entries]}, timeout=300)
-    except (urllib.error.URLError, OSError):
-        return AGENT_HINT
+    except (urllib.error.URLError, OSError) as e:
+        return _agent_hint(e)
     if not result.get("ok"):
         return f"upload failed: {result.get('message')}"
     calendar_save(entries)
@@ -197,6 +224,49 @@ def remove_calendar_entry(date: str, name: str, calendar_replace_ok: bool = Fals
     return f"Removed {name!r} on {day}.\n" + calendar_text(entries)
 
 
+ROUTE_HELP = ("A route comes from a GPX file: gpx_path = path of a .gpx file on this computer (preferred), or gpx_text "
+              "= the GPX document as text. Tracks (trk) and routes (rte) work; very dense tracks are thinned out.")
+
+
+@server.tool(description="Check a GPX file and show what would be sent as a route (no device access). " + ROUTE_HELP)
+def preview_route(name: str, gpx_path: str = "", gpx_text: str = "") -> str:
+    try:
+        _, info = build_route(name, gpx_path, gpx_text)
+    except ServiceError as e:
+        return f"Error: {e}"
+    return route_text(name, info)
+
+
+@server.tool(description="Upload a route (GPX) to the S810 over Bluetooth; it appears under Courses > Route. Requires "
+                         "the user's go-ahead. name_confirmed_new=true only after the user confirmed that no route of "
+                         "that name is on the device. The phone's Bluetooth must be off and the S810 not connected via "
+                         "USB. " + ROUTE_HELP)
+def upload_route(name: str, gpx_path: str = "", gpx_text: str = "", name_confirmed_new: bool = False,
+                 overwrite: bool = False) -> str:
+    try:
+        payload, info = build_route(name, gpx_path, gpx_text)
+    except ServiceError as e:
+        return f"Error: {e}"
+    reason = route_refusal(name, name_confirmed_new, overwrite)
+    if reason:
+        return "Not uploaded. " + reason
+    try:
+        result = _agent("/upload", {"kind": "route", "name": name, "payload": base64.b64encode(payload).decode()},
+                        timeout=300)
+    except (urllib.error.URLError, OSError) as e:
+        return "Not uploaded. " + _agent_hint(e)
+    if not result.get("ok"):
+        return f"Upload failed: {result.get('message')}. Nothing was changed on the device."
+    remember_route(name)
+    return f"{result['message']}.\n" + route_text(name, info)
+
+
+@server.tool(description="Route names this server knows to be on the S810 (uploaded through it, or listed in "
+                         "config.json as known_routes). Not read from the device.")
+def list_known_routes() -> str:
+    return "\n".join(known_routes())
+
+
 @server.tool(description="Workout names known to be on the S810 (seed list plus everything uploaded "
                          "through this server). Not read from the device.")
 def list_known_workouts() -> str:
@@ -207,9 +277,11 @@ def list_known_workouts() -> str:
 def agent_status() -> str:
     try:
         r = _agent("/health", timeout=5)
+        if r.get("api", 1) < AGENT_API_REQUIRED:
+            return OUTDATED_HINT
         return "Agent running" + (" (busy)" if r.get("busy") else "")
-    except (urllib.error.URLError, OSError):
-        return AGENT_HINT
+    except (urllib.error.URLError, OSError) as e:
+        return _agent_hint(e)
 
 
 def main():

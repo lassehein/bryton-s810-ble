@@ -13,11 +13,14 @@ import os
 import re
 import unicodedata
 from pathlib import Path
+from xml.etree.ElementTree import ParseError as ET_ParseError
 
+from bryton import route as routelib
 from bryton.fitgen import MAX_STEPS, PRIMARY_KEYS, SpecError, build_files, resolve_plan
 
 STATE_DIR = Path(os.environ.get("BRYTON_S810_HOME", Path.home() / ".bryton_s810"))
 KNOWN_FILE = STATE_DIR / "known_workouts.json"
+KNOWN_ROUTES_FILE = STATE_DIR / "known_routes.json"
 CONFIG_FILE = STATE_DIR / "config.json"
 # Names of workouts already on the device can be listed in config.json ("known_workouts"); they are
 # never overwritten without an explicit overwrite=True. The device list cannot be read over Bluetooth.
@@ -273,3 +276,83 @@ def calendar_text(entries):
     if not entries:
         return "Calendar (from this server): empty"
     return "Calendar (from this server):\n" + "\n".join(f"  {d}  {n}" for d, n, _, _ in entries)
+
+
+# --- Routes ---------------------------------------------------------------------------------
+# The route list of the device cannot be read over Bluetooth either, so the server remembers the names it
+# uploaded. config.json "known_routes" can list names that are already on the device.
+ROUTE_NAME_MAX_BYTES = 32
+
+
+def known_routes():
+    try:
+        stored = json.loads(KNOWN_ROUTES_FILE.read_text())
+    except (OSError, ValueError):
+        stored = []
+    seed = load_config().get("known_routes") or []
+    return sorted(set(seed) | set(stored), key=str.lower)
+
+
+def remember_route(name):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    KNOWN_ROUTES_FILE.write_text(json.dumps(sorted(set(known_routes()) | {name}, key=str.lower), indent=1))
+
+
+def check_route_name(name):
+    if not name or not name.strip() or any(ord(c) < 32 for c in name):
+        raise ServiceError("route name must not be empty or contain control characters")
+    if len(name.encode("utf-8")) > ROUTE_NAME_MAX_BYTES:
+        raise ServiceError(f"route name: at most {ROUTE_NAME_MAX_BYTES} bytes (UTF-8)")
+
+
+def load_gpx(gpx_path="", gpx_text="", max_bytes=20 * 1024 * 1024):
+    if bool(gpx_path) == bool(gpx_text):
+        raise ServiceError("give exactly one of gpx_path (a .gpx file on this computer) or gpx_text")
+    if gpx_path:
+        path = Path(gpx_path).expanduser()
+        if path.suffix.lower() != ".gpx" or not path.is_file():
+            raise ServiceError(f"gpx_path must be an existing .gpx file: {gpx_path}")
+        if path.stat().st_size > max_bytes:
+            raise ServiceError("GPX file is larger than 20 MB")
+        return path.read_text(encoding="utf-8", errors="replace")
+    return gpx_text
+
+
+def build_route(name, gpx_path="", gpx_text=""):
+    """Returns (gzip payload for the device, summary dict). Raises ServiceError."""
+    check_route_name(name)
+    try:
+        points = routelib.thin(routelib.parse_gpx(load_gpx(gpx_path, gpx_text)))
+        if len(points) > routelib.MAX_POINTS:  # thin harder instead of refusing long tracks
+            spacing = routelib.POINT_SPACING_M
+            while len(points) > routelib.MAX_POINTS:
+                spacing *= 1.5
+                points = routelib.thin(points, spacing)
+        fit = routelib.encode_fit(points, markers=("Start", "Ziel"))
+    except (routelib.RouteError, ET_ParseError) as e:
+        raise ServiceError(f"GPX: {e}") from None
+    s = routelib.decode_fit(fit)[254][0]
+    payload = routelib.to_transfer_payload(fit)
+    return payload, {"points": len(points), "km": round(s[6] / 1000, 1), "ascent_m": s[9], "descent_m": s[10],
+                     "bytes": len(payload), "flat": s[7] == s[8]}
+
+
+def route_text(name, info, warnings=()):
+    lines = [f"Route {name!r}: {info['km']} km, {info['points']} points, ascent {info['ascent_m']} m, "
+             f"descent {info['descent_m']} m, {info['bytes']} bytes on the wire"]
+    if info.get("flat"):
+        warnings = [*warnings, "all altitudes are equal: the GPX file probably has no <ele> elevation data, "
+                               "so the elevation profile on the device will be flat"]
+    return "\n".join(lines + [f"Note: {w}" for w in warnings])
+
+
+def route_refusal(name, name_confirmed_new, overwrite):
+    exists = name.lower() in {n.lower() for n in known_routes()}
+    if exists and not overwrite:
+        return (f"A route named {name!r} is already on the device (or was uploaded before). Ask the user whether "
+                "to add it anyway (it may appear twice, unverified) and call again with overwrite=true, or choose "
+                "another name.")
+    if not exists and not (name_confirmed_new or overwrite):
+        return ("The route list of the device cannot be read over Bluetooth. Ask the user to confirm that no route "
+                f"named {name!r} exists on the S810 (Courses > Route), then call again with name_confirmed_new=true.")
+    return None

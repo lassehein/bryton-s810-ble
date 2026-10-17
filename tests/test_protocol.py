@@ -81,3 +81,39 @@ def test_transfer_target_bytes_match_calendar_capture():
     assert begin_transfer().hex() == "4601010048" and end_transfer().hex() == "4601000047"
     assert begin_transfer("calendar").hex() == "4601010149"
     assert end_transfer("calendar").hex() == "4601000148"
+
+
+def _att(handle, value, op=0x52):
+    import struct
+    return (0.0, "TX", bytes([op]) + struct.pack("<H", handle) + value)
+
+
+def _frames_for(kind, transfers):
+    frames = []
+    for start, packets, end in transfers:
+        frames.append(_att(0x10, bytes([0x10, 0x00, kind]), 0x12))
+        frames.append(_att(0x0D, start))
+        frames += [_att(0x0D, p) for p in packets]
+        frames.append(_att(0x0D, end, 0x12))
+    return frames
+
+
+def test_extract_single_chunk_files():
+    from bryton.protocol import build_transfer
+    from tools.pklg_extract import assemble_files, extract_transfers
+    frames = []
+    for payload in (bytes(range(256)) * 3, b"short"):
+        frames += _frames_for(0x0B, [build_transfer(payload)])
+    got = [(k, d) for k, d, _ in assemble_files(extract_transfers(frames))]
+    assert got == [(0x0B, bytes(range(256)) * 3), (0x0B, b"short")]
+
+
+def test_large_file_is_split_into_chunks_and_rejoined():
+    from bryton.protocol import MAX_CHUNK_PAYLOAD, build_chunks
+    from tools.pklg_extract import assemble_files, extract_transfers
+    data = bytes(range(256)) * 90  # 23040 bytes
+    chunks = build_chunks(data)
+    assert len(chunks) == 4 and all(len(c[1]) <= 47 for c in chunks)
+    assert MAX_CHUNK_PAYLOAD == 6922
+    (kind, out, note), = list(assemble_files(extract_transfers(_frames_for(0x0B, chunks))))
+    assert (kind, out, note) == (0x0B, data, "ok")

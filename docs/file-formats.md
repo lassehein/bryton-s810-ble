@@ -63,3 +63,25 @@ A step with **only** a cadence target can also use the FIT primary target (`targ
 
 A calendar entry is the same pair of files with `plan: ["YYYY-MM-DD"]`, uploaded with destination `01`
 (see [bluetooth.md](bluetooth.md)). The `plan` field alone does not make a workout appear in the calendar.
+
+## Routes
+
+A route is a gzip-compressed FIT file with Bryton-specific message numbers, sent as file kind `0b`
+(see [bluetooth.md](bluetooth.md)). Encoder and decoder: [`bryton/route.py`](../bryton/route.py).
+
+| Message | Content |
+|---|---|
+| 248 | file version (`0`, `1`) |
+| 254 | summary: point count, latitude max/min, longitude max/min (micro-degrees), distance (m), altitude max/min, ascent, descent (m) |
+| 251 | one entry per point: its index |
+| 253 / 252 | number of waypoint messages / number of points |
+| 250 | waypoint: point index, type, distance along the route (m), reserved, name (32 bytes UTF-8). Types seen: 100 named point, 190/191 climb start/end, 250 start/end marker of a planned route, 1/2/5/33 turn entries |
+| 249 | point: latitude, longitude (micro-degrees, `sint32`), altitude `uint16` = `(metres + 500) * 5`, grade `sint16` in whole percent times 100 |
+
+The route name is not in the file. After the file, the phone sends the name with command `0x31` (see the Bluetooth
+document). Routes do not appear on the USB drive; they are listed on the device under `Courses > Route`.
+Routes planned inside the Bryton app and routes imported from GPX/Strava use the same file format.
+
+Pace Pilot adds two files: a route file of kind `1a` (like `0b`, with an extra waypoint of type 150 at the end of
+each pacing segment and without message 248) and a JSON `coach_report` of kind `1b` with the pacing plan, nutrition
+and screen layout. The plan is computed in the Bryton app; this project does not generate it.

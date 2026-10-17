@@ -12,6 +12,7 @@ def state(tmp_path, monkeypatch):
     import bryton.service as svc
     monkeypatch.setattr(svc, "STATE_DIR", tmp_path)
     monkeypatch.setattr(svc, "KNOWN_FILE", tmp_path / "known_workouts.json")
+    monkeypatch.setattr(svc, "KNOWN_ROUTES_FILE", tmp_path / "known_routes.json")
     monkeypatch.setattr(svc, "CONFIG_FILE", tmp_path / "config.json")
     (tmp_path / "config.json").write_text(json.dumps({"ftp": 220, "known_workouts": ["4x4"]}))
     return tmp_path
@@ -158,3 +159,72 @@ def test_mcp_calendar_sends_whole_calendar(monkeypatch, state):
     monkeypatch.setattr(mod, "_agent", lambda *a, **k: {"ok": False, "message": "boom"})
     assert "Not uploaded" in mod.upload_workout("Cal_C", FOUR_BY_FOUR, date="2099-01-03", calendar_replace_ok=True)
     assert "Cal_C" not in mod.list_calendar()
+
+
+GPX = ('<gpx xmlns="http://www.topografix.com/GPX/1/1"><trk><trkseg>'
+       + "".join(f'<trkpt lat="{47 + i * 3e-4}" lon="8.0"><ele>{400 + (i % 40)}</ele></trkpt>' for i in range(300))
+       + "</trkseg></trk></gpx>")
+
+
+def test_route_service_and_mcp_tools(monkeypatch, tmp_path):
+    import gzip
+    from bryton import mcp_server as mod
+    from bryton import route
+    from bryton.service import ServiceError, build_route, check_route_name, route_refusal
+    payload, info = build_route("Loop", gpx_text=GPX)
+    assert info["points"] > 10 and 8 < info["km"] < 11 and route.decode_fit(gzip.decompress(payload))
+    gpx_file = tmp_path / "r.gpx"
+    gpx_file.write_text(GPX)
+    assert build_route("Loop", gpx_path=str(gpx_file))[1] == info
+    for bad in ({"gpx_path": str(tmp_path / "nope.gpx")}, {"gpx_path": str(gpx_file), "gpx_text": GPX}, {}):
+        with pytest.raises(ServiceError):
+            build_route("Loop", **bad)
+    with pytest.raises(ServiceError):
+        check_route_name("x" * 33)
+    assert "confirm" in route_refusal("New", False, False) and route_refusal("New", True, False) is None
+    sent = []
+    monkeypatch.setenv("BRYTON_NO_AUTOSTART", "1")
+    monkeypatch.setattr(mod, "_agent", lambda path, payload=None, **k: sent.append(payload) or {"ok": True, "message": "ok"})
+    assert mod.upload_route("Loop", gpx_text=GPX).startswith("Not uploaded") and not sent
+    out = mod.upload_route("Loop", gpx_text=GPX, name_confirmed_new=True)
+    assert sent and sent[0]["kind"] == "route" and "Loop" in mod.list_known_routes() and "km" in out
+    assert "already" in mod.upload_route("loop", gpx_text=GPX, name_confirmed_new=True)
+    assert "Error" in mod.preview_route("Loop", gpx_text="<gpx/>")
+
+
+def test_agent_route_upload(state):
+    got = {}
+
+    async def fake_route(payload, name, log=print):
+        got["payload"], got["name"] = payload, name
+
+    from http.server import ThreadingHTTPServer
+    from bryton import agent
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler("secret", route_uploader=fake_route))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        data = b"\x1f\x8b" + b"\0" * 30
+        code, body = _post(url, {"kind": "route", "name": "R", "payload": base64.b64encode(data).decode()}, "secret")
+        assert code == 200 and body["ok"] and got == {"payload": data, "name": "R"}
+        assert _post(url, {"kind": "route", "name": "R", "payload": base64.b64encode(b"plain").decode()}, "secret")[0] == 400
+    finally:
+        srv.shutdown()
+
+
+def test_outdated_agent_is_refused(monkeypatch):
+    from bryton import mcp_server as mod
+    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False})  # no "api"
+    with pytest.raises(mod.AgentOutdated):
+        mod._agent("/upload", {"x": 1})
+    assert "old Bluetooth agent" in mod.agent_status()
+    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 2})
+    assert mod.agent_status() == "Agent running"
+
+
+def test_route_warns_without_elevation():
+    from bryton.service import build_route, route_text
+    flat = GPX.replace("<ele>", "<x>").replace("</ele>", "</x>")
+    payload, info = build_route("Flat", gpx_text=flat)
+    assert info["flat"] and "no <ele>" in route_text("Flat", info)
+    assert "no <ele>" not in route_text("Hilly", build_route("Hilly", gpx_text=GPX)[1])

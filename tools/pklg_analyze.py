@@ -177,6 +177,8 @@ def main():
     ap.add_argument("--handle", type=lambda s: int(s, 0))
     ap.add_argument("--from-start", action="store_true")
     ap.add_argument("--transfer-window", action="store_true")
+    ap.add_argument("--before", type=float, default=2.0, help="transfer window: seconds before the first start packet")
+    ap.add_argument("--after", type=float, default=2.0, help="transfer window: seconds after the last end packet")
     ap.add_argument("--baseline", help="cmds: compare against this capture")
     a = ap.parse_args()
     records = list(read_records(open(a.pklg, "rb").read()))
@@ -238,7 +240,7 @@ def main():
                  and struct.unpack("<H", pdu[1:3])[0] == 0x0D and pdu[3:6] == b"\x00\x00\x00"]
         if not marks:
             raise SystemExit("no file-transfer packets found")
-        lo, hi = marks[0][0] - 2.0, marks[-1][0] + 2.0
+        lo, hi = marks[0][0] - a.before, marks[-1][0] + a.after
         t0 = None
         for t, direction, pdu in frames:
             if not lo <= t <= hi or not pdu:
@@ -249,6 +251,8 @@ def main():
             t0 = t if t0 is None else t0
             h = f"0x{handle:04x}" if handle is not None else "     -"
             shown = "data" if handle == 0x0D and len(value) > 16 else value.hex()
+            if handle == 0x18 and (a.before != 2.0 or a.after != 2.0) and value and value[0] not in (0x31, 0x46, 0x18):
+                shown = f"{value[:2].hex()} (payload hidden, profile data)"  # wide windows: only transfer commands in full
             print(f"{t - t0:9.3f} {direction} {ATT_NAMES.get(op, hex(op)):14} {h} len={len(value):3} {shown}")
 
     else:

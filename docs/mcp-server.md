@@ -33,11 +33,11 @@ pip install "bryton-s810-ble[mcp] @ git+https://github.com/OWNER/bryton-s810-ble
 Optional settings in `~/.bryton_s810/config.json` (used for the preview and for name safety):
 
 ```json
-{"ftp": 220, "mhr": 188, "lthr": 154, "known_workouts": ["4x4", "MyOldWorkout"]}
+{"ftp": 220, "mhr": 188, "lthr": 154, "known_workouts": ["4x4", "MyOldWorkout"], "known_routes": ["My Old Route"]}
 ```
 
 - `ftp`, `mhr`, `lthr` only convert percentages to watts/bpm in the preview. The device uses its own zones.
-- `known_workouts`: names that already exist on the device. The server will not overwrite them without `overwrite`.
+- `known_workouts`, `known_routes`: names that already exist on the device. The server will not overwrite them without `overwrite`.
 
 ### Claude Desktop
 
@@ -71,6 +71,9 @@ automatic agent start should work there (untested). Otherwise start `bryton-agen
 | `list_known_workouts` | Names this server knows to be on the device. |
 | `list_calendar` | The calendar this server last sent. |
 | `remove_calendar_entry` | Remove a planned day and resend the calendar. |
+| `preview_route` | Check a GPX file and show distance, points and ascent. No device access. |
+| `upload_route` | Upload a GPX route; it appears under `Courses > Route` on the device. |
+| `list_known_routes` | Route names this server knows to be on the device. |
 | `agent_status` | Is the Bluetooth agent reachable? |
 
 ### Steps
@@ -88,6 +91,13 @@ automatic agent start should work there (untested). Otherwise start `bryton-agen
   target, `[low, high]` a range. Optional `cadence` (rpm) on top. A step with only `cadence` is a cadence step.
 - `name`: up to 9 characters. Workout name: 1-20 characters of letters, digits, `_`, `-`.
 - Umlauts in descriptions are transliterated (`ä` becomes `ae`).
+
+### Routes
+
+Give `gpx_path` (a `.gpx` file on your computer) or `gpx_text`. Tracks and routes are accepted; dense tracks are
+thinned to roughly one point every 30 m. The route list of the device cannot be read over Bluetooth, so Claude
+must ask whether the name is new (`name_confirmed_new`). Names are at most 32 bytes. Routes have no calendar and
+no Pace Pilot data; turn instructions and points of interest are not generated. Delete routes on the device.
 
 ### Safety rules built into `upload_workout`
 

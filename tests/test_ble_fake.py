@@ -110,3 +110,50 @@ def test_no_handshake_sends_nothing(monkeypatch):
 async def _raise_timeout(aw):
     aw.close()
     raise asyncio.TimeoutError
+
+
+class RouteDevice(FakeDevice):
+    """Answers like the S810 did in the route captures (kind 0b, no 46 frames, name via 0x31)."""
+
+    def on_write(self, uuid, data):
+        ch = CH[uuid]
+        self.writes.append((ch, data.hex()))
+        h = data.hex()
+        if ch == "0x10" and h.startswith("0808"):
+            self.notify(CONTROL_CHAR_UUID, bytes.fromhex("082802"))
+        elif ch == "0x10" and h == "10000b":
+            self.notify(CONTROL_CHAR_UUID, bytes.fromhex("102002"))
+        elif ch == "0x0d" and len(data) == 7 and data[:3] != b"\x00\x00\x00":
+            self.notify(CONTROL_CHAR_UUID, bytes.fromhex("1040030000"))
+        elif ch == "0x18" and h == "310435":
+            self.notify(COMMAND_CHAR_UUID, bytes.fromhex("310501000138"))
+        elif ch == "0x18" and h.startswith("3101"):
+            self.notify(COMMAND_CHAR_UUID, bytes.fromhex("310a"))
+            if data[2] + 1 < data[3]:  # asks for the next name frame
+                self.notify(COMMAND_CHAR_UUID, bytes([0x31, 0x02, data[2] + 1, (0x33 + data[2] + 1) & 0xFF]))
+
+
+def test_route_upload_sequence(monkeypatch):
+    import random
+    from bryton import route
+    from bryton.ble import upload_route
+    from bryton.protocol import name_frames
+    rnd = random.Random(2)
+    pts = [(10 + i * 1e-4 + rnd.random() * 1e-4, 20 + rnd.random() * 1e-3, rnd.random() * 90) for i in range(2500)]
+    payload = route.to_transfer_payload(route.encode_fit(pts))
+    dev = RouteDevice()
+    install_fake_bleak(monkeypatch, dev)
+    asyncio.run(upload_route(payload, "A route name that is longer than sixteen", log=lambda line: None))
+    tx18 = [h for ch, h in dev.writes if ch == "0x18"]
+    assert not any(h.startswith("46") for h in tx18)  # no begin/end frames for routes
+    assert [h for ch, h in dev.writes if ch == "0x10" and h == "10000b"] and len(
+        [1 for ch, h in dev.writes if ch == "0x10" and h == "10000b"]) >= 2  # several chunks
+    assert [h for h in tx18 if h.startswith("3101")] == [f.hex() for f in name_frames("A route name that is longer than sixteen")]
+
+
+def test_name_frames_match_capture():
+    from bryton.protocol import name_frames
+    frames = name_frames("Ref_Route2")
+    assert frames[0].hex() == "310100020a3e"  # as sent by the app
+    assert frames[1][:13].hex() == "3101015265665f526f7574653200"[:26]
+    assert len(name_frames("x" * 40)) == 3 and name_frames("x" * 40)[0].hex().startswith("31010003")

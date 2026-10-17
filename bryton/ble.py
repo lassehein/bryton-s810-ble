@@ -1,14 +1,14 @@
-"""BLE upload of one workout (FIT + JSON) to the Bryton Rider S810.
+"""BLE upload of workouts (FIT + JSON) and routes to the Bryton Rider S810.
 
-Sequence as in the iPhone capture (bryton/protocol.py: plan_upload), verified on the device.
+Sequences as in the iPhone captures (bryton/protocol.py: plan_upload, plan_route_upload).
 Raises UploadError on any failure; never leaves the device in transfer mode (46 01 00).
 """
 import asyncio
 import time
 
 from bryton.protocol import (COMMAND_CHAR_UUID, CONTROL_CHAR_UUID, FILE_CHAR_UUID, HANDSHAKE, ack_for,
-                             begin_transfer, build_query, build_transfer, end_transfer, plan_upload,
-                             reassemble, reply_seen)
+                             begin_transfer, build_chunks, build_query, build_transfer, end_transfer,
+                             plan_route_upload, plan_upload, reassemble, reply_seen)
 
 PACE = 0.002   # capture: ~1 ms between write-without-response packets
 MIN_MTU = 153  # 150-byte packets + 3 ATT header bytes
@@ -53,9 +53,19 @@ async def upload(fit, js, devname="rider", address=None, log=print, target="plan
 async def upload_many(workouts, devname="rider", address=None, log=print, target="plan"):
     """Send several (fit, js) pairs in one session. A calendar session REPLACES the whole device
     calendar, so it must carry every planned day."""
+    await run_steps(plan_upload(transfer_pairs(workouts), target), devname, address, log,
+                    begin=begin_transfer(target), end=end_transfer(target))
+
+
+async def upload_route(payload, name, devname="rider", address=None, log=print):
+    """Send a route (gzip-compressed route FIT, bryton/route.py) and its name. No begin/end frames."""
+    await run_steps(plan_route_upload(build_chunks(payload), name), devname, address, log)
+
+
+async def run_steps(steps, devname, address, log, begin=None, end=None):
+    """Connect, handshake and play `steps`; if begin was sent but not end, send end before leaving."""
     from bleak import BleakClient
-    BEGIN_TRANSFER, END_TRANSFER = begin_transfer(target), end_transfer(target)
-    steps = plan_upload(transfer_pairs(workouts), target)
+    BEGIN_TRANSFER, END_TRANSFER = begin, end
     t0 = time.time()
     disconnected, handshake_ok = asyncio.Event(), asyncio.Event()
     seen = []
@@ -114,8 +124,8 @@ async def upload_many(workouts, devname="rider", address=None, log=print, target
             for ch, data, response, exp in steps:
                 mark = len(seen)  # before the write: the reply can arrive while the write is awaited
                 await write(ch, data, response)
-                begun = begun or data == BEGIN_TRANSFER
-                end_sent = end_sent or data == END_TRANSFER
+                begun = begun or (BEGIN_TRANSFER is not None and data == BEGIN_TRANSFER)
+                end_sent = end_sent or (END_TRANSFER is not None and data == END_TRANSFER)
                 if not response:
                     await asyncio.sleep(PACE)
                 if exp and not await expect(exp, 6 if exp == "done" else 3, mark):
