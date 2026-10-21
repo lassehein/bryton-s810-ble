@@ -1,6 +1,7 @@
-"""List and download recorded rides from the S810 over Bluetooth (read-only).
+"""List and download recorded rides, or read the rider profile, from the S810 over Bluetooth (read-only).
 
   PYTHONPATH=. python3 tools/bryton_rides.py list
+  PYTHONPATH=. python3 tools/bryton_rides.py profile      # FTP, max HR, LTHR, height, weight stored on the device
   PYTHONPATH=. python3 tools/bryton_rides.py download --out ~/bryton_rides [--id 1792588357] [--log read.log]
 
 Only rides the Bryton app has not fetched yet are in the device list. The app's acknowledgement (command 33)
@@ -13,7 +14,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bryton.ble import UploadError, download_rides, list_rides
+from bryton.ble import UploadError, download_rides, list_rides, read_profile
 
 
 def describe(e):
@@ -23,7 +24,7 @@ def describe(e):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["list", "download"])
+    ap.add_argument("cmd", choices=["list", "download", "profile"])
     ap.add_argument("--out", default="rides")
     ap.add_argument("--id", type=int, action="append")
     ap.add_argument("--log", default=None)
@@ -35,7 +36,10 @@ if __name__ == "__main__":
         if logf:
             logf.write(text + "\n")
     try:
-        if a.cmd == "list":
+        if a.cmd == "profile":
+            p = asyncio.run(read_profile(log=line))
+            print("\n".join(f"{k}: {v}" for k, v in p.items()))
+        elif a.cmd == "list":
             rides = asyncio.run(list_rides(log=line, preamble=a.preamble))
             print("\n".join(describe(e) for e in rides) or "no rides in the device list")
         else:

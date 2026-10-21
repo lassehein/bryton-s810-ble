@@ -304,3 +304,40 @@ def parse_ride_list(body):
         ride_id, moving, dist = struct.unpack(">III", e[1:13])
         out.append({"id": ride_id, "moving_s": moving, "distance_m": dist})
     return out
+
+
+# --- Rider profile stored on the device (read in the app's connect sync, capture 2026-10-20/21) ------
+# `<cmd> 04 <sum>` -> `<cmd> 05 ..` (ready), then `<cmd> 02 <item> <sum>` -> `<cmd> 01 <item> <data> <sum>`.
+# 21 / 22 / 23 = FTP / max HR / LTHR: item 0 = value (u16 LE), item 1 = zone limits (u16 LE list, ends with ffff).
+# 1e = body data: selector `00 <item>`, item 0 = height, item 1 = weight; reply `1e 01 00 <item> <f32 LE> <f32 LE>`
+# (first value in cm / kg, second in inch / lb).
+PROFILE_SCALARS = {0x21: "ftp", 0x22: "mhr", 0x23: "lthr"}
+BODY_CMD = 0x1E
+
+
+def parse_profile_scalar(frame):
+    """Item 0 reply of 21 / 22 / 23 -> int."""
+    _check_profile_frame(frame, 5)
+    return int.from_bytes(frame[3:5], "little")
+
+
+def parse_profile_zones(frame):
+    """Item 1 reply of 21 / 22 / 23 -> zone limits, e.g. [0, 55, 75, 90, 105, 120, 150]."""
+    _check_profile_frame(frame, 6)
+    body = frame[3:-1]
+    values = [int.from_bytes(body[i:i + 2], "little") for i in range(0, len(body) - 1, 2)]
+    while values and values[-1] == 0xFFFF:
+        values.pop()
+    return values
+
+
+def parse_body_item(frame):
+    """Item 0 / 1 reply of 1e -> (metric value, imperial value), rounded to 0.1."""
+    _check_profile_frame(frame, 13)
+    a, b = struct.unpack("<ff", frame[4:12])
+    return round(a, 1), round(b, 1)
+
+
+def _check_profile_frame(frame, min_len):
+    if len(frame) < min_len or frame[1] != 0x01 or sum(frame[:-1]) & 0xFF != frame[-1]:
+        raise ValueError(f"bad profile reply {bytes(frame).hex()}")

@@ -73,6 +73,9 @@ automatic agent start should work there (untested). Otherwise start `bryton-agen
 | `remove_calendar_entry` | Remove a planned day and resend the calendar. |
 | `preview_route` | Check a GPX file and show distance, points and ascent. No device access. |
 | `upload_route` | Upload a GPX route; it appears under `Courses > Route` on the device. |
+| `read_device_profile` | Read FTP, max HR, LTHR, height and weight from the device (read-only) and use them for later previews and plans instead of `config.json`. |
+| `preview_pace_plan` | Calculate a Pace Pilot plan for a GPX route and show it (no device access). |
+| `upload_pace_plan` | Upload the route with its plan; it appears under `Courses > Route` and `Pace Pilot`. |
 | `list_rides` | List the rides on the device that the Bryton app has not fetched yet (read-only). |
 | `download_rides` | Save those rides as FIT files in `~/.bryton_s810/rides` (read-only, the app can still sync them). |
 | `list_known_routes` | Route names this server knows to be on the device. |
@@ -126,3 +129,25 @@ no Pace Pilot data; turn instructions and points of interest are not generated. 
 yet; the transfer does not mark them as synced, so the app still gets them on its next sync. Files are saved to
 `~/.bryton_s810/rides/<UTC start>_<id>.fit` (heart rate, power and position data: keep them private). The phone's
 Bluetooth must be off and the device must not be connected via USB.
+
+### Pace Pilot
+
+`preview_pace_plan` / `upload_pace_plan` calculate a pacing plan for a GPX route: up to 12 segments with target power
+range, estimated speed and time, a hint per segment, and nutrition and hydration. The device shows it as the
+app's Pace Pilot does. Inputs: effort (`very_light` to `maximal`), rider and bike weight, bike type, surface, language,
+and optionally the six data fields on the screen. FTP, max HR and LTHR come from `config.json`; the weights can be
+set there too (`rider_kg`, `bike_kg`), otherwise Claude asks.
+
+FTP, max HR, LTHR and the rider weight are taken from the device (`read_device_profile`, remembered in
+`~/.bryton_s810/device_profile.json`) and override `config.json`; run it again after you change the profile on the device.
+The bike weight is not stored on the device: pass `bike_kg` or set it in `config.json`.
+
+**Wind and weather.** Either give `wind_kmh`, `wind_from_deg` (where the wind blows *from*: 0 = north, 90 = east) and
+`temperature_c`, or give `ride_date` (today up to about 15 days ahead) and `start_time` to use the free
+[Open-Meteo](https://open-meteo.com) forecast at the middle of the route (needs internet; the 10 m wind is scaled by 0.7
+to rider height, a rough estimate). The wind is applied per segment from the direction of travel and changes speeds and
+times, so also the nutrition schedule; the target watts stay the same. Values you give win over the forecast.
+
+The plan is a physics model (power, grade, drag, rolling resistance). Only the `moderate`
+effort level is checked against the Bryton app's own plan; the other levels are estimates. Compare the first segments
+with the app before relying on it.

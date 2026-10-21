@@ -14,6 +14,7 @@ def state(tmp_path, monkeypatch):
     monkeypatch.setattr(svc, "KNOWN_FILE", tmp_path / "known_workouts.json")
     monkeypatch.setattr(svc, "KNOWN_ROUTES_FILE", tmp_path / "known_routes.json")
     monkeypatch.setattr(svc, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(svc, "DEVICE_PROFILE_FILE", tmp_path / "device_profile.json")
     (tmp_path / "config.json").write_text(json.dumps({"ftp": 220, "known_workouts": ["4x4"]}))
     return tmp_path
 
@@ -218,7 +219,7 @@ def test_outdated_agent_is_refused(monkeypatch):
     with pytest.raises(mod.AgentOutdated):
         mod._agent("/upload", {"x": 1})
     assert "old Bluetooth agent" in mod.agent_status()
-    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 3})
+    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 5})
     assert mod.agent_status() == "Agent running"
 
 
@@ -279,3 +280,136 @@ def test_mcp_ride_tools(monkeypatch, state):
     assert "No rides" in mod.list_rides() and "No matching rides" in mod.download_rides([])
     monkeypatch.setattr(mod, "_agent", lambda *a, **k: {"ok": False, "message": "boom"})
     assert "boom" in mod.list_rides() and "boom" in mod.download_rides([])
+
+
+def _hilly_gpx(n=400):
+    import math
+    pts = "".join(f'<trkpt lat="{47 + i * 0.0003:.6f}" lon="{8 + math.sin(i / 40) * 0.003:.6f}"><ele>{400 + 60 * math.sin(i / 70) + i * 0.1:.1f}</ele></trkpt>'
+                  for i in range(n))
+    return f'<gpx version="1.1" creator="t"><trk><trkseg>{pts}</trkseg></trk></gpx>'
+
+
+def test_build_pace_needs_weights_and_plans(state):
+    from bryton.service import ServiceError, build_pace, pace_text
+    gpx = _hilly_gpx()
+    with pytest.raises(ServiceError, match="rider_kg"):
+        build_pace("P1", gpx_text=gpx)
+    payload, report_json, info = build_pace("P1", gpx_text=gpx, rider_kg=75, bike_kg=8, effort="hard", language="en")
+    assert payload[:2] == b"\x1f\x8b" and report_json.startswith(b"{") and info["report"]["tactical_segments"]
+    text = pace_text("P1", info)
+    assert "effort hard" in text and "W" in text and "calibrated" in text
+    with pytest.raises(ServiceError, match="Pace Pilot"):
+        build_pace("P1", gpx_text=gpx, rider_kg=75, bike_kg=8, effort="turbo")
+    with pytest.raises(ServiceError, match="Pace Pilot"):
+        build_pace("P1", gpx_text=gpx, rider_kg=75, bike_kg=8, screen=["Power"])
+
+
+def test_mcp_pace_tools(monkeypatch, state):
+    import bryton.mcp_server as mod
+    sent = []
+    monkeypatch.setattr(mod, "_agent", lambda path, payload=None, **k: sent.append(payload) or {"ok": True, "message": "ok"})
+    gpx = _hilly_gpx()
+    assert "Pace Pilot plan" in mod.preview_pace_plan("P2", gpx_text=gpx, rider_kg=75, bike_kg=8)
+    assert mod.preview_pace_plan("P2", gpx_text=gpx).startswith("Error")
+    assert "confirm" in mod.upload_pace_plan("P2", gpx_text=gpx, rider_kg=75, bike_kg=8)  # name not confirmed
+    assert not sent
+    out = mod.upload_pace_plan("P2", gpx_text=gpx, rider_kg=75, bike_kg=8, name_confirmed_new=True)
+    assert "Pace Pilot plan" in out and sent[0]["kind"] == "pace" and sent[0]["name"] == "P2"
+    assert json.loads(base64.b64decode(sent[0]["report"]))["coach_report"]["tactical_segments"]
+    assert "already on the device" in mod.upload_pace_plan("P2", gpx_text=gpx, rider_kg=75, bike_kg=8, name_confirmed_new=True)
+
+
+def test_agent_pace_upload(state):
+    got = {}
+
+    async def fake_pace(route_payload, report_json, name, log=print):
+        got.update(route=route_payload, report=report_json, name=name)
+
+    from http.server import ThreadingHTTPServer
+    from bryton import agent
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler("secret", pace_uploader=fake_pace))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        route = b"\x1f\x8b" + b"\0" * 30
+        body = {"kind": "pace", "name": "P", "payload": base64.b64encode(route).decode(),
+                "report": base64.b64encode(b'{"coach_report": {}}').decode()}
+        code, resp = _post(url, body, "secret")
+        assert code == 200 and resp["ok"] and got == {"route": route, "report": b'{"coach_report": {}}', "name": "P"}
+        body["report"] = base64.b64encode(b"nope").decode()
+        assert _post(url, body, "secret")[0] == 400
+    finally:
+        srv.shutdown()
+
+
+def test_device_profile_overrides_config(state, monkeypatch):
+    import bryton.mcp_server as mod
+    from bryton.service import load_config, profile_text, save_device_profile
+    assert load_config()["ftp"] == 220 and "mhr" not in load_config()
+    prof = {"ftp": 250, "mhr": 188, "lthr": 154, "ftp_zones": [0, 55, 75], "mhr_zones": [0, 60], "lthr_zones": [0, 81],
+            "height_cm": 175.0, "weight_kg": 70.0}
+    text = profile_text(save_device_profile(prof))
+    assert "FTP 250 W" in text and "weight 70 kg" in text
+    cfg = load_config()
+    assert (cfg["ftp"], cfg["mhr"], cfg["lthr"], cfg["rider_kg"]) == (250, 188, 154, 70.0)
+    assert mod._ftp() == 250
+    # the pace plan needs only bike_kg now: the rider weight comes from the device
+    from bryton.service import build_pace
+    _, _, info = build_pace("P3", gpx_text=_hilly_gpx(), bike_kg=8)
+    assert info["rider"].rider_kg == 70.0 and info["rider"].ftp == 250
+    monkeypatch.setattr(mod, "_agent", lambda path, payload=None, **k: {"ok": True, "profile": prof})
+    assert mod.read_device_profile().startswith("Saved. FTP 250 W")
+    monkeypatch.setattr(mod, "_agent", lambda *a, **k: {"ok": False, "message": "boom"})
+    assert "boom" in mod.read_device_profile()
+
+
+def test_agent_profile_endpoint(state):
+    from http.server import ThreadingHTTPServer
+    from bryton import agent
+
+    async def fake_read(log=print):
+        return {"ftp": 220}
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler("secret", profile_reader=fake_read))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        def post(token):
+            req = urllib.request.Request(url + "/profile", data=b"{}", headers={"X-Bryton-Token": token})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        assert post("wrong")[0] == 403
+        assert post("secret") == (200, {"ok": True, "profile": {"ftp": 220}})
+    finally:
+        srv.shutdown()
+
+
+def test_pace_with_given_wind_and_forecast(state, monkeypatch):
+    from bryton import weather
+    from bryton.service import ServiceError, build_pace, pace_text
+    gpx = _hilly_gpx()
+    calm = build_pace("W0", gpx_text=gpx, rider_kg=75, bike_kg=8)[2]
+    windy = build_pace("W1", gpx_text=gpx, rider_kg=75, bike_kg=8, wind_kmh=25, wind_from_deg=0, temperature_c=10)[2]
+    assert windy["report"]["race_summary"]["total_est_time_sec"] != calm["report"]["race_summary"]["total_est_time_sec"]
+    text = pace_text("W1", windy)
+    assert "given by you" in text and "target watts do not change" in text and "no weather" not in text
+    assert "no weather, no wind" in pace_text("W0", calm)
+    seen = {}
+
+    def fake_forecast(lat, lon, day, start_time, hours, **k):
+        seen.update(lat=lat, day=day, start=start_time, hours=hours)
+        return {"wind_ms": 6.0, "wind_from_deg": 225, "temp_c": 12.5, "gust_ms": 9.0, "source": "Open-Meteo forecast"}
+    monkeypatch.setattr(weather, "fetch_weather", fake_forecast)
+    fc = build_pace("W2", gpx_text=gpx, rider_kg=75, bike_kg=8, ride_date="2026-10-25", start_time="09:30")[2]
+    assert seen["day"] == "2026-10-25" and seen["start"] == "09:30" and 46.9 < seen["lat"] < 48 and seen["hours"] > 0
+    assert fc["rider"].wind_from_deg == 225 and fc["rider"].temp_c == 12.5 and "Open-Meteo" in pace_text("W2", fc)
+    own = build_pace("W3", gpx_text=gpx, rider_kg=75, bike_kg=8, ride_date="2026-10-25", wind_kmh=0)[2]
+    assert own["rider"].wind_ms == 0 and own["rider"].temp_c == 12.5  # given wind wins, temperature from the forecast
+
+    def broken(*a, **k):
+        raise weather.WeatherError("weather request failed (OSError: offline)")
+    monkeypatch.setattr(weather, "fetch_weather", broken)
+    with pytest.raises(ServiceError, match="weather request failed"):
+        build_pace("W4", gpx_text=gpx, rider_kg=75, bike_kg=8, ride_date="2026-10-25")

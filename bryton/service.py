@@ -11,6 +11,7 @@ import datetime
 import json
 import os
 import re
+import time
 import unicodedata
 from pathlib import Path
 from xml.etree.ElementTree import ParseError as ET_ParseError
@@ -22,6 +23,7 @@ STATE_DIR = Path(os.environ.get("BRYTON_S810_HOME", Path.home() / ".bryton_s810"
 KNOWN_FILE = STATE_DIR / "known_workouts.json"
 KNOWN_ROUTES_FILE = STATE_DIR / "known_routes.json"
 CONFIG_FILE = STATE_DIR / "config.json"
+DEVICE_PROFILE_FILE = STATE_DIR / "device_profile.json"  # last profile read from the device (read_device_profile)
 # Names of workouts already on the device can be listed in config.json ("known_workouts"); they are
 # never overwritten without an explicit overwrite=True. The device list cannot be read over Bluetooth.
 NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,20}$")
@@ -40,10 +42,36 @@ def ascii_fold(text):
 
 
 def load_config():
+    """config.json, with ftp / mhr / lthr / rider_kg replaced by the values last read from the device."""
     try:
-        return json.loads(CONFIG_FILE.read_text())
+        cfg = json.loads(CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        cfg = {}
+    cfg.update({k: v for k, v in load_device_profile().items() if k in ("ftp", "mhr", "lthr", "rider_kg") and v})
+    return cfg
+
+
+def load_device_profile():
+    try:
+        return json.loads(DEVICE_PROFILE_FILE.read_text())
     except (OSError, ValueError):
         return {}
+
+
+def save_device_profile(profile):
+    """profile as returned by bryton.ble.read_profile; stored with weight_kg also as rider_kg."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    data = {**profile, "rider_kg": profile.get("weight_kg"), "read_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    DEVICE_PROFILE_FILE.write_text(json.dumps(data, indent=1))
+    return data
+
+
+def profile_text(profile):
+    def z(key):
+        return "/".join(str(v) for v in profile.get(key, [])[1:]) or "?"
+    return (f"FTP {profile['ftp']} W, max HR {profile['mhr']} bpm, LTHR {profile['lthr']} bpm, "
+            f"height {profile['height_cm']:g} cm, weight {profile['weight_kg']:g} kg (from the device). "
+            f"Zone limits FTP % {z('ftp_zones')}; max HR % {z('mhr_zones')}; LTHR % {z('lthr_zones')}.")
 
 
 def known_names():
@@ -370,3 +398,82 @@ def describe_ride(entry):
     from datetime import datetime, timezone
     start = datetime.fromtimestamp(entry["id"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     return f"id {entry['id']}: {start}, {entry['moving_s'] // 60} min moving, {entry['distance_m'] / 1000:.1f} km"
+
+
+def build_pace(name, gpx_path="", gpx_text="", effort="moderate", rider_kg=0.0, bike_kg=0.0, bike="road",
+               surface="asphalt", language="de", main_field="", screen=(), wind_kmh=-1.0, wind_from_deg=-1.0,
+               temperature_c=-99.0, ride_date="", start_time="10:00"):
+    """Pace Pilot plan for a GPX route. Returns (route gzip payload, report JSON bytes, summary dict).
+    FTP, max HR and LTHR come from the device profile or config.json; the weights must be given (parameter,
+    device profile or config.json). Wind and temperature: given values (wind_kmh, wind_from_deg = where the wind blows
+    FROM, temperature_c; negative / -99 = not given), or the forecast for ride_date + start_time."""
+    from bryton import pace, weather
+    check_route_name(name)
+    cfg = load_config()
+    rider_kg = rider_kg or cfg.get("rider_kg") or 0
+    bike_kg = bike_kg or cfg.get("bike_kg") or 0
+    if not rider_kg or not bike_kg:
+        raise ServiceError("rider_kg and bike_kg are needed (parameters, or rider_kg / bike_kg in config.json): "
+                           "ask the user (rider weight: read_device_profile), the plan depends on them")
+    if not cfg.get("ftp"):
+        raise ServiceError("ftp is missing in config.json (also mhr, lthr if known)")
+    try:
+        rider = pace.Rider(ftp=cfg["ftp"], mhr=cfg.get("mhr", 185), lthr=cfg.get("lthr", 0), rider_kg=rider_kg,
+                           bike_kg=bike_kg, bike=bike, surface=surface, effort=effort, language=language,
+                           main_field=main_field or pace.Rider.main_field,
+                           screen=tuple(screen) if screen else pace.DEFAULT_SCREEN)
+        rider.check()
+        points = routelib.thin(routelib.parse_gpx(load_gpx(gpx_path, gpx_text)))
+        spacing = routelib.POINT_SPACING_M
+        while len(points) > routelib.MAX_POINTS:
+            spacing *= 1.5
+            points = routelib.thin(points, spacing)
+        conditions = None
+        if wind_kmh >= 0 or temperature_c > -99:
+            conditions = {"source": "given by you"}
+        if wind_kmh >= 0:
+            rider.wind_ms, rider.wind_from_deg = wind_kmh / 3.6, max(wind_from_deg, 0.0)
+        if temperature_c > -99:
+            rider.temp_c = temperature_c
+        if ride_date and (wind_kmh < 0 or temperature_c <= -99):
+            hours = pace.build_plan(points, rider)[0]["coach_report"]["race_summary"]["total_est_time_sec"] / 3600
+            mid = points[len(points) // 2]
+            w = weather.fetch_weather(mid[0], mid[1], ride_date, start_time, hours)
+            if wind_kmh < 0:
+                rider.wind_ms, rider.wind_from_deg = w["wind_ms"], w["wind_from_deg"]
+            if temperature_c <= -99:
+                rider.temp_c = w["temp_c"]
+            conditions = {"source": w["source"] + (" (the rest given by you)" if conditions else ""), "gust_ms": w["gust_ms"]}
+        if conditions:
+            conditions.update(wind_ms=rider.wind_ms, wind_from_deg=rider.wind_from_deg, temp_c=rider.temp_c)
+        payload, report_json, report = pace.build_files(points, rider)
+    except (ValueError, routelib.RouteError, ET_ParseError, weather.WeatherError) as e:
+        raise ServiceError(f"Pace Pilot: {e}") from None
+    r = report["coach_report"]
+    return payload, report_json, {"report": r, "points": len(points), "route_bytes": len(payload),
+                                  "report_bytes": len(report_json), "rider": rider, "conditions": conditions}
+
+
+def pace_text(name, info):
+    r, rider = info["report"], info["rider"]
+    s = r["race_summary"]
+    lines = [f"Pace Pilot plan {name!r}: {s['total_distance_km']} km, ascent {s['total_elevation_m']} m, "
+             f"estimated {s['total_est_time']}, average {s['avg_power_w']} W (IF {s['intensity_factor']}), "
+             f"{s['total_work_kj']} kJ, {len(r['tactical_segments'])} segments",
+             f"Rider: FTP {rider.ftp} W, {rider.rider_kg:g} kg + bike {rider.bike_kg:g} kg, effort {rider.effort}, "
+             f"{rider.bike}, {rider.surface}",
+             f"Nutrition: {r['nutrition_and_energy']['carbohydrates']['energy_gels']['total_gels']} gels, "
+             f"{r['nutrition_and_energy']['hydration']['total_ml']} ml; screen: main {rider.main_field}, "
+             f"fields {', '.join(rider.screen)}"]
+    c = info.get("conditions")
+    if c:
+        t = f", {c['temp_c']:g} C" if c.get("temp_c") is not None else ""
+        gust = f", gusts up to {c['gust_ms'] * 3.6:.0f} km/h" if c.get("gust_ms") else ""
+        lines.append(f"Conditions ({c['source']}): wind {c['wind_ms'] * 3.6:.0f} km/h from {c['wind_from_deg']:.0f} deg "
+                     f"(0 = north, 90 = east){t}{gust}. Speeds and times include the wind; target watts do not change.")
+    for g in r["tactical_segments"]:
+        lines.append(f"  {g['segment']:2}  {g['distance_km']:6.2f} km  {g['avg_gradient_pct']:5.1f} %  "
+                     f"{g['target_power_w_low']}-{g['target_power_w_high']} W  {g['est_speed_kmh']} km/h  {g['tactical_note']}")
+    lines.append("Note: this is a physics model" + ("" if c else " (no weather, no wind)") + ". Only 'moderate' effort is calibrated against "
+                 "the Bryton app's own plan; other levels are estimates.")
+    return "\n".join(lines)

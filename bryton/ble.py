@@ -9,9 +9,9 @@ import time
 import types
 
 from bryton.protocol import (COMMAND_CHAR_UUID, CONTROL_CHAR_UUID, FILE_CHAR_UUID, HANDSHAKE, MAX_READ,
-                             INFO_GO, INFO_REQUEST, READ_GO, RIDE_LIST_EMPTY, RIDE_LIST_GO, RIDE_LIST_REQUEST, TransferReceiver, ack_for,
-                             begin_transfer, build_chunks, build_query, build_transfer, end_transfer,
-                             parse_ride_list, plan_pace_upload, plan_route_upload, plan_upload, read_request,
+                             BODY_CMD, INFO_GO, INFO_REQUEST, PROFILE_SCALARS, READ_GO, RIDE_LIST_EMPTY, RIDE_LIST_GO, RIDE_LIST_REQUEST, TransferReceiver, ack_for,
+                             begin_transfer, build_chunks, build_query, command, build_transfer, end_transfer,
+                             parse_body_item, parse_profile_scalar, parse_profile_zones, parse_ride_list, plan_pace_upload, plan_route_upload, plan_upload, read_request,
                              reassemble, reply_seen)
 
 PACE = 0.002   # capture: ~1 ms between write-without-response packets
@@ -239,4 +239,46 @@ async def download_rides(ride_ids=None, devname="rider", address=None, log=print
                 raise UploadError(f"ride {e['id']}: not a FIT file (starts with {data[:12].hex()})")
             out.append((e, data))
         await asyncio.sleep(1)
+    return out
+
+
+async def _ask(s, frame, match, timeout=3):
+    """Write a 0x18 frame and return the first reply on 0x18 for which match(reply) holds."""
+    mark = len(s.seen)
+    await s.write("0x18", frame, True)
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for ch, d in s.seen[mark:]:
+            if ch == "0x18" and match(d):
+                await asyncio.sleep(0.1)  # let the reactive ack go out first
+                return d
+        if s.disconnected.is_set():
+            break
+        await asyncio.sleep(0.02)
+    got = ", ".join(f"{ch}:{d.hex()}" for ch, d in s.seen[mark:][:6]) or "nothing"
+    raise UploadError(f"no reply to {frame.hex()} (received: {got})")
+
+
+async def read_profile(devname="rider", address=None, log=print):
+    """Read-only: FTP, max HR, LTHR (with zone limits), height and weight stored on the device.
+    -> {"ftp", "mhr", "lthr", "ftp_zones", "mhr_zones", "lthr_zones", "height_cm", "weight_kg"}"""
+    out = {}
+    async with _session(devname, address, log) as s:
+        for cmd, key in PROFILE_SCALARS.items():
+            await _ask(s, command(cmd, 0x04), lambda d, c=cmd: d[:2] == bytes([c, 0x05]))
+            first = await _ask(s, command(cmd, 0x02, 0), lambda d, c=cmd: d[:3] == bytes([c, 0x01, 0]))
+            zones = await _ask(s, command(cmd, 0x02, 1), lambda d, c=cmd: d[:3] == bytes([c, 0x01, 1]))
+            try:
+                out[key], out[key + "_zones"] = parse_profile_scalar(first), parse_profile_zones(zones)
+            except ValueError as e:
+                raise UploadError(str(e)) from None
+        await _ask(s, command(BODY_CMD, 0x04), lambda d: d[:2] == bytes([BODY_CMD, 0x05]))
+        for item, key in ((0, "height_cm"), (1, "weight_kg")):
+            reply = await _ask(s, command(BODY_CMD, 0x02, 0, item),
+                               lambda d, i=item: d[:4] == bytes([BODY_CMD, 0x01, 0, i]) and len(d) >= 13)
+            try:
+                out[key] = parse_body_item(reply)[0]
+            except ValueError as e:
+                raise UploadError(str(e)) from None
+        await asyncio.sleep(0.5)
     return out

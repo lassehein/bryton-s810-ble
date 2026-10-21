@@ -106,3 +106,55 @@ def test_screen_fields_are_configurable_and_paired():
     for bad in (dict(screen=("HeartRate",) * 5), dict(screen=("Nope",) * 6), dict(main_field="Nope")):
         with pytest.raises(ValueError):
             pace.Rider(**bad).check()
+
+
+def _north_road():
+    return [(47 + i * 0.0009, 8.0, 400.0) for i in range(200)]  # ~20 km flat, driving north
+
+
+def test_wind_changes_speed_not_target_power():
+    from bryton import pace
+
+    def plan(wind, frm):
+        r = pace.Rider(ftp=220, mhr=188, rider_kg=77, bike_kg=8, wind_ms=wind, wind_from_deg=frm)
+        rep, _ = pace.build_plan(_north_road(), r)
+        return rep["coach_report"]
+    calm, head, tail, cross = plan(0, 0), plan(5, 0), plan(5, 180), plan(5, 90)
+    t = lambda c: c["race_summary"]["total_est_time_sec"]
+    assert t(head) > t(calm) > t(tail)
+    assert abs(t(cross) - t(calm)) < 0.05 * t(calm)  # crosswind: almost no effect in this model
+    assert head["tactical_segments"][0]["target_power_w_low"] == calm["tactical_segments"][0]["target_power_w_low"]
+
+
+def test_air_density_and_validation():
+    from bryton import pace
+    assert abs(pace.air_density(15, 0) - 1.225) < 0.001 and pace.air_density(30, 1000) < 1.1
+    with pytest.raises(ValueError):
+        pace.Rider(wind_ms=40).check()
+    cold = pace.Rider(ftp=220, mhr=188, rider_kg=77, bike_kg=8, temp_c=-5)
+    warm = pace.Rider(ftp=220, mhr=188, rider_kg=77, bike_kg=8, temp_c=30)
+    tc = pace.build_plan(_north_road(), cold)[0]["coach_report"]["race_summary"]["total_est_time_sec"]
+    tw = pace.build_plan(_north_road(), warm)[0]["coach_report"]["race_summary"]["total_est_time_sec"]
+    assert tc > tw  # denser air is slower
+
+
+def test_weather_forecast_vector_mean_and_errors():
+    from datetime import date
+    from bryton.weather import WeatherError, fetch_weather
+    times = [f"2026-10-22T{h:02d}:00" for h in range(24)]
+    hourly = {"time": times, "temperature_2m": [10 + 0.5 * i for i in range(24)], "wind_speed_10m": [6.0] * 24,
+              "wind_direction_10m": [270] * 24, "wind_gusts_10m": [10.0] * 24}
+    got = fetch_weather(53.5, 10.0, "2026-10-22", "09:00", 2.0, fetch=lambda url: {"hourly": hourly}, today=date(2026, 10, 21))
+    assert got["wind_from_deg"] == 270 and got["wind_ms"] == 4.2 and got["temp_c"] == 15.0
+    opposite = {**hourly, "wind_direction_10m": [90, 270] * 12}  # alternating: vector mean cancels
+    assert fetch_weather(53.5, 10.0, "2026-10-22", "09:00", 1.0, fetch=lambda url: {"hourly": opposite},
+                         today=date(2026, 10, 21))["wind_ms"] < 0.3
+    with pytest.raises(WeatherError, match="15 days"):
+        fetch_weather(53.5, 10.0, "2027-01-01", fetch=lambda url: {}, today=date(2026, 10, 21))
+    with pytest.raises(WeatherError, match="YYYY-MM-DD"):
+        fetch_weather(53.5, 10.0, "tomorrow", fetch=lambda url: {})
+
+    def down(url):
+        raise OSError("offline")
+    with pytest.raises(WeatherError, match="weather request failed"):
+        fetch_weather(53.5, 10.0, "2026-10-22", fetch=down, today=date(2026, 10, 21))

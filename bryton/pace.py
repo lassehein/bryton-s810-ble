@@ -69,6 +69,9 @@ class Rider:
     notes: list = field(default_factory=list)  # optional: one text per segment (overrides the templates)
     main_field: str = "3Sec_Power_target"  # the big bar in the middle of the screen
     screen: tuple = DEFAULT_SCREEN  # the six data fields, top left to bottom right
+    wind_ms: float = 0.0  # wind at rider height in m/s (the forecast's 10 m wind is scaled down by the caller)
+    wind_from_deg: float = 0.0  # direction the wind blows FROM (0 = north, 90 = east)
+    temp_c: float = None  # None: fixed air density RHO; otherwise density from temperature and route altitude
 
     def check(self):
         if self.effort not in EFFORT_IF or self.surface not in CRR or self.bike not in CDA or self.language not in NOTES:
@@ -77,18 +80,22 @@ class Rider:
         if self.main_field not in MAIN_FIELDS or len(self.screen) != 6 or any(f not in SCREEN_CHOICES for f in self.screen):
             raise ValueError("main_field must be one of " + ", ".join(MAIN_FIELDS) + "; screen needs 6 of "
                              + ", ".join(SCREEN_CHOICES))
+        if not (0 <= self.wind_ms <= 25 and (self.temp_c is None or -30 <= self.temp_c <= 50)):
+            raise ValueError("wind_ms must be 0-25 and temp_c -30..50")
         if not (50 <= self.ftp <= 600 and 120 <= self.mhr <= 230 and 30 <= self.rider_kg + self.bike_kg <= 250):
             raise ValueError("ftp, mhr or weights out of range")
 
 
-def speed_ms(power_w, grade_pct, mass_kg, crr, cda):
-    """Steady speed (m/s) for a wheel power; bisection on the power equation, capped at MAX_SPEED_MS."""
+def speed_ms(power_w, grade_pct, mass_kg, crr, cda, headwind=0.0, rho=RHO):
+    """Steady ground speed (m/s) for a wheel power; bisection on the power equation, capped at MAX_SPEED_MS.
+    headwind (m/s, negative = tailwind) adds to the air speed."""
     slope = math.atan(grade_pct / 100)
     force0 = mass_kg * G * (crr * math.cos(slope) + math.sin(slope))
     watts = power_w * DRIVETRAIN
 
     def need(v):
-        return v * (force0 + 0.5 * RHO * cda * v * v)
+        air = v + headwind
+        return v * (force0 + 0.5 * rho * cda * air * abs(air))
 
     if need(MAX_SPEED_MS) <= watts:
         return MAX_SPEED_MS
@@ -113,6 +120,34 @@ def _profile(points):
             j1 += 1
         alt.append(sum(p[2] for p in points[j0:j1 + 1]) / (j1 - j0 + 1))
     return cum, alt
+
+
+def air_density(temp_c, altitude_m):
+    """kg/m3 from temperature and altitude (standard pressure at that altitude)."""
+    return 101325 * math.exp(-altitude_m / 8434) / (287.05 * (temp_c + 273.15))
+
+
+def _bearing_deg(a, b):
+    la1, la2 = math.radians(a[0]), math.radians(b[0])
+    dlon = math.radians(b[1] - a[1])
+    y = math.sin(dlon) * math.cos(la2)
+    x = math.cos(la1) * math.sin(la2) - math.sin(la1) * math.cos(la2) * math.cos(dlon)
+    return math.degrees(math.atan2(y, x)) % 360
+
+
+def segment_headwind(points, cum, a, b, wind_ms, wind_from_deg):
+    """Mean headwind component (m/s, negative = tailwind) over points a..b, weighted by distance."""
+    if wind_ms <= 0 or b <= a:
+        return 0.0
+    total = acc = 0.0
+    for i in range(a, b):
+        d = cum[i + 1] - cum[i]
+        if d <= 0:
+            continue
+        angle = math.radians(wind_from_deg - _bearing_deg(points[i], points[i + 1]))
+        acc += d * wind_ms * math.cos(angle)  # wind from the direction of travel: cos = 1 = headwind
+        total += d
+    return acc / total if total else 0.0
 
 
 def _grade_class(g):
@@ -168,18 +203,20 @@ def build_plan(points, rider):
     segs = split_segments(points, cum, alt)
     lthr = rider.lthr or round(rider.mhr * 0.92)
     mass, crr, cda = rider.rider_kg + rider.bike_kg, CRR[rider.surface], CDA[rider.bike]
+    rho = RHO if rider.temp_c is None else air_density(rider.temp_c, sum(alt) / len(alt))
     target = EFFORT_IF[rider.effort] * rider.ftp
     info = []
     for a, b in segs:
         d = cum[b] - cum[a]
         grade = (alt[b] - alt[a]) / d * 100 if d > 0 else 0.0
         info.append({"a": a, "b": b, "d": d, "grade": grade,
+                     "hw": segment_headwind(points, cum, a, b, rider.wind_ms, rider.wind_from_deg),
                      "factor": 1.08 if grade > 3 else 1.04 if grade > 1.5 else 0.7 if grade < -3 else 0.9 if grade < -1.5 else 1.0})
     scale = 1.0
     for _ in range(3):  # time-weighted mean power on target
         for s in info:
             s["p"] = target * s["factor"] * scale
-            s["v"] = speed_ms(s["p"], s["grade"], mass, crr, cda)
+            s["v"] = speed_ms(s["p"], s["grade"], mass, crr, cda, s["hw"], rho)
             s["t"] = s["d"] / s["v"]
         mean = sum(s["p"] * s["t"] for s in info) / sum(s["t"] for s in info)
         scale *= target / mean

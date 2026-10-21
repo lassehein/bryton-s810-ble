@@ -19,10 +19,10 @@ def device_transfer(body, tag=b"\x11\x00\x01", chunk=148):
     return out
 
 
-def test_ride_list_entry_from_capture():
-    body = bytes.fromhex("136553f1000000219e0000c3920000000000") + b"\x02" + bytes(17)
+def test_ride_list_entry_layout():
+    body = b"\x13" + struct.pack(">III", 0x6553F100, 3600, 25000) + bytes(5) + b"\x02" + bytes(17)
     assert len(body) == 36
-    assert parse_ride_list(body) == [{"id": 0x6553F100, "moving_s": 8606, "distance_m": 50066}]
+    assert parse_ride_list(body) == [{"id": 0x6553F100, "moving_s": 3600, "distance_m": 25000}]
 
 
 def test_read_request_matches_capture():
@@ -157,3 +157,62 @@ def test_plain_fit_is_accepted_and_garbage_rejected(monkeypatch):
     install_fake_bleak(monkeypatch, RideDevice(b"x" * 40, gz=False))
     with pytest.raises(UploadError, match="not a FIT file"):
         asyncio.run(download_rides(log=lambda line: None))
+
+
+# --- rider profile -------------------------------------------------------------------------------
+from bryton.protocol import (parse_body_item, parse_profile_scalar, parse_profile_zones)  # noqa: E402
+
+PROFILE_FRAMES = {  # as captured: request -> reply
+    "210425": "210501000128", "21020023": "210100dc00fe",
+    "21020124": "210101000037004b005a00690078009600ffff74",
+    "220426": "220501000129", "22020024": "220100bc00df",
+    "22020125": "22010100003c00460050005a005d006000ffff0b",
+    "230427": "23050100012a", "23020025": "2301009a00be",
+    "23020126": "2301010000510058005d00640066006900ffff5c",
+    "1e0422": "1e0501006f93", "1e02000020": "1e01000000002f43cdcc8942f5",
+    "1e02000121": "1e01000100008c42cd4c1a4364",
+}
+
+
+def test_profile_parsers_match_capture():
+    assert parse_profile_scalar(bytes.fromhex("210100dc00fe")) == 220
+    assert parse_profile_zones(bytes.fromhex(PROFILE_FRAMES["21020124"])) == [0, 55, 75, 90, 105, 120, 150]
+    assert parse_body_item(bytes.fromhex("1e01000100008c42cd4c1a4364")) == (70.0, 154.3)
+    with pytest.raises(ValueError):
+        parse_profile_scalar(bytes.fromhex("210100dc00ff"))  # wrong checksum
+
+
+class ProfileDevice(FakeDevice):
+    def on_write(self, uuid, data):
+        ch, h = CH[uuid], data.hex()
+        self.writes.append((ch, h))
+        if ch == "0x10" and h.startswith("0808"):
+            self.notify(CONTROL_CHAR_UUID, bytes.fromhex("082802"))
+        elif ch == "0x18" and h == "2f0433":
+            self.notify(COMMAND_CHAR_UUID, bytes.fromhex("2f050700013f02faf90300000073"))
+        elif ch == "0x18" and h in PROFILE_FRAMES:
+            self.notify(COMMAND_CHAR_UUID, bytes.fromhex(PROFILE_FRAMES[h]))
+
+
+def test_read_profile_from_fake_device(monkeypatch):
+    from bryton.ble import read_profile
+    install_fake_bleak(monkeypatch, ProfileDevice(b"x"))
+    p = asyncio.run(read_profile(log=lambda line: None))
+    assert (p["ftp"], p["mhr"], p["lthr"], p["height_cm"], p["weight_kg"]) == (220, 188, 154, 175.0, 70.0)
+    assert p["lthr_zones"] == [0, 81, 88, 93, 100, 102, 105]
+
+
+def test_read_profile_reports_silence(monkeypatch):
+    from bryton.ble import UploadError, read_profile
+
+    class Mute(ProfileDevice):
+        def on_write(self, uuid, data):
+            if CH[uuid] == "0x18" and data.hex().startswith("22"):
+                self.writes.append(("0x18", data.hex()))
+                return
+            super().on_write(uuid, data)
+    install_fake_bleak(monkeypatch, Mute(b"x"))
+    import bryton.ble as ble
+    monkeypatch.setattr(ble.time, "time", iter(range(0, 100000, 2)).__next__)  # make the 3 s deadline pass fast
+    with pytest.raises(UploadError, match="no reply to 2204"):
+        asyncio.run(read_profile(log=lambda line: None))

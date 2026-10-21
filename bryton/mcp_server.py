@@ -13,9 +13,9 @@ import time
 import urllib.error
 import urllib.request
 
-from bryton.service import (STATE_DIR, ServiceError, build, build_route, calendar_entries, calendar_save,
+from bryton.service import (STATE_DIR, ServiceError, build, build_pace, build_route, calendar_entries, calendar_save,
                             calendar_text, calendar_with, calendar_without, describe_ride, known_names, known_routes,
-                            load_config, preview_text, remember_name, remember_route, resolve_date,
+                            load_config, pace_text, preview_text, profile_text, save_device_profile, remember_name, remember_route, resolve_date,
                             route_refusal, route_text, upload_refusal)
 
 try:  # mcp >= 2
@@ -36,6 +36,8 @@ app disappear. Tell the user once and pass calendar_replace_ok=true after they a
 the workout goes into the workout list.
 Routes: preview_route / upload_route take a GPX file (gpx_path); they appear on the device under Courses > Route and
 the route list cannot be read, so ask whether the name is new (name_confirmed_new) before uploading.
+Pace Pilot: preview_pace_plan / upload_pace_plan calculate a pacing plan (target watts per segment, nutrition) for a GPX route and
+send it as route + plan. read_device_profile fetches FTP, max HR, LTHR and weight from the device first. Ask the user for bike weight, bike weight, effort and bike/surface; the plan is a model without weather.
 Rides: list_rides / download_rides read finished rides the Bryton app has not fetched yet (read-only, saved as FIT files).
 Never upload without the user's explicit go-ahead."""
 
@@ -82,7 +84,7 @@ def _start_agent():
     return False
 
 
-AGENT_API_REQUIRED = 3  # bryton.agent.AGENT_API: 2 = routes, 3 = reading rides
+AGENT_API_REQUIRED = 5  # bryton.agent.AGENT_API: 2 = routes, 3 = reading rides, 4 = Pace Pilot, 5 = rider profile
 
 
 class AgentOutdated(OSError):
@@ -260,6 +262,75 @@ def upload_route(name: str, gpx_path: str = "", gpx_text: str = "", name_confirm
         return f"Upload failed: {result.get('message')}. Nothing was changed on the device."
     remember_route(name)
     return f"{result['message']}.\n" + route_text(name, info)
+
+
+@server.tool(description="Read FTP, max HR, LTHR, height and weight from the S810 (read-only) and remember them: "
+                         "workout previews and Pace Pilot plans then use the device values instead of config.json. "
+                         "Call it once before planning, and again after the user changed the profile on the device. "
+                         "The phone's Bluetooth must be off and the S810 not connected via USB.")
+def read_device_profile() -> str:
+    try:
+        result = _agent("/profile", {}, timeout=60)
+    except (urllib.error.URLError, OSError) as e:
+        return "Not read. " + _agent_hint(e)
+    if not result.get("ok"):
+        return f"Could not read the profile: {result.get('message')}."
+    return "Saved. " + profile_text(save_device_profile(result["profile"]))
+
+
+PACE_HELP = ("gpx_path (a .gpx file on this computer) or gpx_text; effort: very_light|light|moderate|hard|maximal (only "
+             "moderate is calibrated); rider_kg (default: the weight from read_device_profile, else config.json, else ask) and bike_kg (ask unless in config.json); bike: "
+             "road|gravel|mtb; surface: asphalt|gravel|offroad; language: de|en (text of the segment hints); optional "
+             "main_field (HeartRate_target|Power_target|Cadence_target|3Sec_Power_target) and screen = exactly 6 of "
+             "HeartRate, Power, Cadence, 3Sec_Power, Segment_Normalized_Power, FTP_Zone, Segment_Distance, Grade, "
+             "Average_Power, Segment_Average_Power, Anaerobic_Reserve (top left to bottom right). FTP, max HR and LTHR "
+             "come from the device profile (read_device_profile) or config.json. Wind and weather: either wind_kmh, "
+             "wind_from_deg (where the wind blows FROM, 0 = north, 90 = east) and temperature_c, or ride_date "
+             "(YYYY-MM-DD, within 15 days) + start_time (HH:MM) for the Open-Meteo forecast at the route (needs internet); "
+             "given values win over the forecast. Wind changes speeds and times (and so nutrition), not the target watts.")
+
+
+@server.tool(description="Calculate a Pace Pilot plan for a GPX route and show it (no device access). " + PACE_HELP)
+def preview_pace_plan(name: str, gpx_path: str = "", gpx_text: str = "", effort: str = "moderate", rider_kg: float = 0,
+                      bike_kg: float = 0, bike: str = "road", surface: str = "asphalt", language: str = "de",
+                      main_field: str = "", screen: list[str] = [], wind_kmh: float = -1,
+                      wind_from_deg: float = -1, temperature_c: float = -99, ride_date: str = "",
+                      start_time: str = "10:00") -> str:
+    try:
+        _, _, info = build_pace(name, gpx_path, gpx_text, effort, rider_kg, bike_kg, bike, surface, language,
+                                main_field, screen, wind_kmh, wind_from_deg, temperature_c, ride_date, start_time)
+    except ServiceError as e:
+        return f"Error: {e}"
+    return pace_text(name, info)
+
+
+@server.tool(description="Upload a route with a calculated Pace Pilot plan to the S810 over Bluetooth (route under "
+                         "Courses > Route, plan under Pace Pilot). Requires the user's go-ahead after preview_pace_plan. "
+                         "name_confirmed_new=true only after the user confirmed that no route of that name is on the "
+                         "device. The phone's Bluetooth must be off and the S810 not connected via USB. " + PACE_HELP)
+def upload_pace_plan(name: str, gpx_path: str = "", gpx_text: str = "", effort: str = "moderate", rider_kg: float = 0,
+                     bike_kg: float = 0, bike: str = "road", surface: str = "asphalt", language: str = "de",
+                     main_field: str = "", screen: list[str] = [], name_confirmed_new: bool = False,
+                     overwrite: bool = False, wind_kmh: float = -1, wind_from_deg: float = -1,
+                     temperature_c: float = -99, ride_date: str = "", start_time: str = "10:00") -> str:
+    try:
+        payload, report_json, info = build_pace(name, gpx_path, gpx_text, effort, rider_kg, bike_kg, bike, surface,
+                                                language, main_field, screen, wind_kmh, wind_from_deg, temperature_c,
+                                                ride_date, start_time)
+    except ServiceError as e:
+        return f"Error: {e}"
+    reason = route_refusal(name, name_confirmed_new, overwrite)
+    if reason:
+        return "Not uploaded. " + reason
+    try:
+        result = _agent("/upload", {"kind": "pace", "name": name, "payload": base64.b64encode(payload).decode(),
+                                    "report": base64.b64encode(report_json).decode()}, timeout=300)
+    except (urllib.error.URLError, OSError) as e:
+        return "Not uploaded. " + _agent_hint(e)
+    if not result.get("ok"):
+        return f"Upload failed: {result.get('message')}. Nothing was changed on the device."
+    remember_route(name)
+    return f"{result['message']}.\n" + pace_text(name, info)
 
 
 RIDES_HELP = ("Rides recorded on the S810 that the Bryton app has not fetched yet. Read-only: nothing is changed or "

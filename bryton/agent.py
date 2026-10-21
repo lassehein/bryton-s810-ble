@@ -14,10 +14,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from bryton.ble import UploadError, download_rides, list_rides, upload_many, upload_route
+from bryton.ble import UploadError, download_rides, list_rides, read_profile, upload_many, upload_pace, upload_route
 from bryton.service import RIDES_DIR, STATE_DIR, ride_filename
 
-AGENT_API = 3  # 1: workouts and calendar, 2: + routes, 3: + reading rides (/rides). The MCP server refuses an older running agent.
+AGENT_API = 5  # 1: workouts and calendar, 2: + routes, 3: + reading rides (/rides), 4: + Pace Pilot plans, 5: + reading the rider profile (/profile). The MCP server refuses an older running agent.
 HOST, PORT = "127.0.0.1", int(os.environ.get("BRYTON_AGENT_PORT", "8765"))
 TOKEN_FILE = STATE_DIR / "agent_token"
 LOG_DIR = STATE_DIR / "logs"
@@ -32,8 +32,10 @@ def write_token():
     return token
 
 
-def run_upload(workouts, name, uploader=upload_many, target="plan", route_payload=None, route_uploader=upload_route):
-    """workouts: [(fit, js)], all sent in one session; or route_payload (gzip bytes) for a route."""
+def run_upload(workouts, name, uploader=upload_many, target="plan", route_payload=None, route_uploader=upload_route,
+               pace=None, pace_uploader=upload_pace):
+    """workouts: [(fit, js)], all sent in one session; or route_payload (gzip bytes) for a route; or pace =
+    (route gzip bytes, report JSON bytes) for a route with a Pace Pilot plan."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     path = LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_{name}.log"
     lines = []
@@ -43,6 +45,10 @@ def run_upload(workouts, name, uploader=upload_many, target="plan", route_payloa
         with open(path, "a") as f:
             f.write(line + "\n")
     try:
+        if pace is not None:
+            asyncio.run(pace_uploader(pace[0], pace[1], name, log=log))
+            return {"ok": True, "message": f"route {name} with its Pace Pilot plan uploaded, device confirmed both files",
+                    "log": lines[-60:]}
         if route_payload is not None:
             asyncio.run(route_uploader(route_payload, name, log=log))
             return {"ok": True, "message": f"route {name} uploaded, device confirmed the file and the name", "log": lines[-60:]}
@@ -82,8 +88,26 @@ def run_rides(action, ids, lister=list_rides, downloader=download_rides):
         return {"ok": False, "message": f"{type(e).__name__}: {e}", "log": lines[-40:]}
 
 
+def run_profile(reader=read_profile):
+    """Read-only: FTP, max HR, LTHR, height and weight stored on the device."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_profile.log"
+    lines = []
+
+    def log(line):
+        lines.append(line)
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    try:
+        return {"ok": True, "profile": asyncio.run(reader(log=log))}
+    except UploadError as e:
+        return {"ok": False, "message": str(e), "log": lines[-40:]}
+    except Exception as e:  # bleak/CoreBluetooth errors
+        return {"ok": False, "message": f"{type(e).__name__}: {e}", "log": lines[-40:]}
+
+
 def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_lister=list_rides,
-                 ride_downloader=download_rides):
+                 ride_downloader=download_rides, pace_uploader=upload_pace, profile_reader=read_profile):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, payload):
             body = json.dumps(payload).encode()
@@ -103,10 +127,17 @@ def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_
                 self._send(404, {"ok": False, "message": "not found"})
 
         def do_POST(self):
-            if self.path not in ("/upload", "/rides"):
+            if self.path not in ("/upload", "/rides", "/profile"):
                 return self._send(404, {"ok": False, "message": "not found"})
             if not secrets.compare_digest(self.headers.get("X-Bryton-Token", ""), token):
                 return self._send(403, {"ok": False, "message": "bad token"})
+            if self.path == "/profile":
+                if not _lock.acquire(blocking=False):
+                    return self._send(409, {"ok": False, "message": "another transfer is running"})
+                try:
+                    return self._send(200, run_profile(profile_reader))
+                finally:
+                    _lock.release()
             if self.path == "/rides":
                 try:
                     req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
@@ -125,8 +156,13 @@ def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 name = str(req["name"])
-                route_payload = None
-                if req.get("kind") == "route":
+                route_payload, pace = None, None
+                if req.get("kind") == "pace":
+                    pace = (base64.b64decode(req["payload"]), base64.b64decode(req["report"]))
+                    workouts = []
+                    if len(pace[0]) < 18 or pace[0][:2] != b"\x1f\x8b" or not pace[1].lstrip().startswith(b"{"):
+                        raise ValueError("pace payload must be gzip route data plus a JSON report")
+                elif req.get("kind") == "route":
                     route_payload = base64.b64decode(req["payload"])
                     workouts = []
                     if len(route_payload) < 18 or route_payload[:2] != b"\x1f\x8b":
@@ -144,7 +180,7 @@ def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_
             if not _lock.acquire(blocking=False):
                 return self._send(409, {"ok": False, "message": "another upload is running"})
             try:
-                self._send(200, run_upload(workouts, name, uploader, target, route_payload, route_uploader))
+                self._send(200, run_upload(workouts, name, uploader, target, route_payload, route_uploader, pace, pace_uploader))
             finally:
                 _lock.release()
     return Handler
