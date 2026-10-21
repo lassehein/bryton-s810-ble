@@ -2,6 +2,7 @@
 
   PYTHONPATH=. python3 tools/bryton_rides.py list
   PYTHONPATH=. python3 tools/bryton_rides.py profile      # FTP, max HR, LTHR, height, weight stored on the device
+  PYTHONPATH=. python3 tools/bryton_rides.py profile --set ftp=225 [--set mhr=188 --set lthr=154] --write   # WRITES
   PYTHONPATH=. python3 tools/bryton_rides.py download --out ~/bryton_rides [--id 1792588357] [--log read.log]
 
 Only rides the Bryton app has not fetched yet are in the device list. The app's acknowledgement (command 33)
@@ -14,7 +15,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from bryton.ble import UploadError, download_rides, list_rides, read_profile
+from bryton.ble import UploadError, download_rides, list_rides, read_profile, write_profile
 
 
 def describe(e):
@@ -28,6 +29,8 @@ if __name__ == "__main__":
     ap.add_argument("--out", default="rides")
     ap.add_argument("--id", type=int, action="append")
     ap.add_argument("--log", default=None)
+    ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="profile: ftp, mhr or lthr")
+    ap.add_argument("--write", action="store_true", help="profile --set: really write (otherwise only show the change)")
     ap.add_argument("--preamble", action="store_true", help="play the app's 06 08 / 06 48 03 device-info exchange first")
     a = ap.parse_args()
     logf = open(a.log, "w", buffering=1) if a.log else None
@@ -37,8 +40,15 @@ if __name__ == "__main__":
             logf.write(text + "\n")
     try:
         if a.cmd == "profile":
-            p = asyncio.run(read_profile(log=line))
-            print("\n".join(f"{k}: {v}" for k, v in p.items()))
+            changes = {k: int(v) for k, v in (item.split("=") for item in a.set)}
+            if changes and a.write:
+                r = asyncio.run(write_profile(changes, log=line))
+                print("before:", {k: r["before"][k] for k in changes}, "after (read back):", {k: r["after"][k] for k in changes})
+            else:
+                p = asyncio.run(read_profile(log=line))
+                print("\n".join(f"{k}: {v}" for k, v in p.items()))
+                if changes:
+                    print("would change:", {k: f"{p[k]} -> {v}" for k, v in changes.items()}, "(add --write)")
         elif a.cmd == "list":
             rides = asyncio.run(list_rides(log=line, preamble=a.preamble))
             print("\n".join(describe(e) for e in rides) or "no rides in the device list")

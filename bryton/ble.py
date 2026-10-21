@@ -9,9 +9,9 @@ import time
 import types
 
 from bryton.protocol import (COMMAND_CHAR_UUID, CONTROL_CHAR_UUID, FILE_CHAR_UUID, HANDSHAKE, MAX_READ,
-                             BODY_CMD, INFO_GO, INFO_REQUEST, PROFILE_SCALARS, READ_GO, RIDE_LIST_EMPTY, RIDE_LIST_GO, RIDE_LIST_REQUEST, TransferReceiver, ack_for,
+                             BODY_CMD, RESTING_CMD, INFO_GO, INFO_REQUEST, PROFILE_SCALARS, READ_GO, RIDE_LIST_EMPTY, RIDE_LIST_GO, RIDE_LIST_REQUEST, TransferReceiver, ack_for,
                              begin_transfer, build_chunks, build_query, command, build_transfer, end_transfer,
-                             parse_body_item, parse_profile_scalar, parse_profile_zones, parse_ride_list, plan_pace_upload, plan_route_upload, plan_upload, read_request,
+                             parse_body_item, parse_profile_scalar, parse_resting_hr, profile_write_frames, resting_write_frame, parse_profile_zones, parse_ride_list, plan_pace_upload, plan_route_upload, plan_upload, read_request,
                              reassemble, reply_seen)
 
 PACE = 0.002   # capture: ~1 ms between write-without-response packets
@@ -259,26 +259,68 @@ async def _ask(s, frame, match, timeout=3):
     raise UploadError(f"no reply to {frame.hex()} (received: {got})")
 
 
+async def _read_profile(s):
+    out = {}
+    for cmd, key in PROFILE_SCALARS.items():
+        await _ask(s, command(cmd, 0x04), lambda d, c=cmd: d[:2] == bytes([c, 0x05]))
+        first = await _ask(s, command(cmd, 0x02, 0), lambda d, c=cmd: d[:3] == bytes([c, 0x01, 0]))
+        zones = await _ask(s, command(cmd, 0x02, 1), lambda d, c=cmd: d[:3] == bytes([c, 0x01, 1]))
+        try:
+            out[key], out[key + "_zones"] = parse_profile_scalar(first), parse_profile_zones(zones)
+        except ValueError as e:
+            raise UploadError(str(e)) from None
+    await _ask(s, command(BODY_CMD, 0x04), lambda d: d[:2] == bytes([BODY_CMD, 0x05]))
+    for item, key in ((0, "height_cm"), (1, "weight_kg")):
+        reply = await _ask(s, command(BODY_CMD, 0x02, 0, item),
+                           lambda d, i=item: d[:4] == bytes([BODY_CMD, 0x01, 0, i]) and len(d) >= 13)
+        try:
+            out[key] = parse_body_item(reply)[0]
+        except ValueError as e:
+            raise UploadError(str(e)) from None
+    try:  # resting heart rate (command 5a); optional: a device without it only costs the short wait
+        await _ask(s, command(RESTING_CMD, 0x04), lambda d: d[:2] == bytes([RESTING_CMD, 0x05]), timeout=2)
+        reply = await _ask(s, command(RESTING_CMD, 0x02), lambda d: d[:2] == bytes([RESTING_CMD, 0x01]), timeout=2)
+        out["resting_hr"] = parse_resting_hr(reply)[0]
+    except (UploadError, ValueError):
+        out["resting_hr"] = None
+    return out
+
+
 async def read_profile(devname="rider", address=None, log=print):
     """Read-only: FTP, max HR, LTHR (with zone limits), height and weight stored on the device.
     -> {"ftp", "mhr", "lthr", "ftp_zones", "mhr_zones", "lthr_zones", "height_cm", "weight_kg"}"""
-    out = {}
     async with _session(devname, address, log) as s:
-        for cmd, key in PROFILE_SCALARS.items():
-            await _ask(s, command(cmd, 0x04), lambda d, c=cmd: d[:2] == bytes([c, 0x05]))
-            first = await _ask(s, command(cmd, 0x02, 0), lambda d, c=cmd: d[:3] == bytes([c, 0x01, 0]))
-            zones = await _ask(s, command(cmd, 0x02, 1), lambda d, c=cmd: d[:3] == bytes([c, 0x01, 1]))
-            try:
-                out[key], out[key + "_zones"] = parse_profile_scalar(first), parse_profile_zones(zones)
-            except ValueError as e:
-                raise UploadError(str(e)) from None
-        await _ask(s, command(BODY_CMD, 0x04), lambda d: d[:2] == bytes([BODY_CMD, 0x05]))
-        for item, key in ((0, "height_cm"), (1, "weight_kg")):
-            reply = await _ask(s, command(BODY_CMD, 0x02, 0, item),
-                               lambda d, i=item: d[:4] == bytes([BODY_CMD, 0x01, 0, i]) and len(d) >= 13)
-            try:
-                out[key] = parse_body_item(reply)[0]
-            except ValueError as e:
-                raise UploadError(str(e)) from None
+        out = await _read_profile(s)
         await asyncio.sleep(0.5)
     return out
+
+
+PROFILE_LIMITS = {"ftp": (50, 600), "mhr": (120, 230), "lthr": (80, 220), "resting_hr": (30, 120)}
+
+
+async def write_profile(changes, devname="rider", address=None, log=print):
+    """Change FTP / max HR / LTHR / resting HR on the device. changes = {"ftp": 230, ...}. In one session: read the profile,
+    send the two frames of the app per changed value (zone limits unchanged), read back and check.
+    Returns {"before": profile, "after": profile}. Raises UploadError if the readback differs."""
+    for key, value in changes.items():
+        if key not in PROFILE_LIMITS or not PROFILE_LIMITS[key][0] <= value <= PROFILE_LIMITS[key][1]:
+            raise UploadError(f"{key}={value}: only ftp {PROFILE_LIMITS['ftp']}, mhr {PROFILE_LIMITS['mhr']}, "
+                              f"lthr {PROFILE_LIMITS['lthr']}, resting_hr {PROFILE_LIMITS['resting_hr']} can be written")
+    async with _session(devname, address, log) as s:
+        before = await _read_profile(s)
+        if {**before, **changes}["lthr"] >= {**before, **changes}["mhr"]:
+            raise UploadError("lthr must be below max HR")
+        todo = {key: v for key, v in changes.items() if v != before.get(key)}
+        for cmd, key in PROFILE_SCALARS.items():
+            if key in todo:
+                for frame in profile_write_frames(cmd, todo[key], before[key + "_zones"]):
+                    await _ask(s, frame, lambda d, c=cmd: d == bytes([c, 0x0A]))
+        if "resting_hr" in todo:
+            await _ask(s, resting_write_frame(todo["resting_hr"], time.time()),
+                       lambda d: d == bytes([RESTING_CMD, 0x0A]))
+        after = await _read_profile(s) if todo else before
+        await asyncio.sleep(0.5)
+    for key, value in todo.items():
+        if after[key] != value:
+            raise UploadError(f"readback of {key} is {after[key]}, expected {value}")
+    return {"before": before, "after": after}

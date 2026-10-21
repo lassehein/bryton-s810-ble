@@ -74,6 +74,7 @@ automatic agent start should work there (untested). Otherwise start `bryton-agen
 | `preview_route` | Check a GPX file and show distance, points and ascent. No device access. |
 | `upload_route` | Upload a GPX route; it appears under `Courses > Route` on the device. |
 | `read_device_profile` | Read FTP, max HR, LTHR, height and weight from the device (read-only) and use them for later previews and plans instead of `config.json`. |
+| `write_device_profile` | Change FTP, max HR, LTHR and/or resting HR stored on the device (shows the change first; writes only with `confirmed=true`). |
 | `preview_pace_plan` | Calculate a Pace Pilot plan for a GPX route and show it (no device access). |
 | `upload_pace_plan` | Upload the route with its plan; it appears under `Courses > Route` and `Pace Pilot`. |
 | `list_rides` | List the rides on the device that the Bryton app has not fetched yet (read-only). |

@@ -84,7 +84,7 @@ def _start_agent():
     return False
 
 
-AGENT_API_REQUIRED = 5  # bryton.agent.AGENT_API: 2 = routes, 3 = reading rides, 4 = Pace Pilot, 5 = rider profile
+AGENT_API_REQUIRED = 6  # bryton.agent.AGENT_API: 2 = routes, 3 = reading rides, 4 = Pace Pilot, 5 = rider profile, 6 = writing FTP
 
 
 class AgentOutdated(OSError):
@@ -276,6 +276,40 @@ def read_device_profile() -> str:
     if not result.get("ok"):
         return f"Could not read the profile: {result.get('message')}."
     return "Saved. " + profile_text(save_device_profile(result["profile"]))
+
+
+@server.tool(description="Change FTP (W), max HR, LTHR and/or resting HR (bpm) stored on the S810; the device keeps its zone "
+                         "percentages and recalculates watts and bpm. Give at least one value. Without confirmed=true "
+                         "it only shows what would change; call it with confirmed=true only after the user agreed to "
+                         "the shown change. The phone's Bluetooth must be off and the S810 not connected via USB.")
+def write_device_profile(ftp: int = 0, mhr: int = 0, lthr: int = 0, resting_hr: int = 0, confirmed: bool = False) -> str:
+    wanted = {k: v for k, v in (("ftp", ftp), ("mhr", mhr), ("lthr", lthr), ("resting_hr", resting_hr)) if v}
+    limits = {"ftp": (50, 600), "mhr": (120, 230), "lthr": (80, 220), "resting_hr": (30, 120)}
+    if not wanted:
+        return "Error: give ftp, mhr, lthr and/or resting_hr."
+    for k, v in wanted.items():
+        if not limits[k][0] <= v <= limits[k][1]:
+            return f"Error: {k} must be {limits[k][0]}-{limits[k][1]}."
+    try:
+        current = _agent("/profile", {}, timeout=60)
+        if not current.get("ok"):
+            return f"Could not read the profile: {current.get('message')}."
+        old = current["profile"]
+        if max(wanted.get("lthr", old["lthr"]), 0) >= wanted.get("mhr", old["mhr"]):
+            return "Error: LTHR must be below max HR."
+        changes = {k: v for k, v in wanted.items() if old.get(k) != v}
+        shown = ", ".join(f"{k.upper()} {old.get(k)} -> {v}" for k, v in changes.items())
+        if not changes:
+            return "The device already has these values, nothing written."
+        if not confirmed:
+            return (f"Not written. Would change: {shown} (zone percentages stay; watts / bpm of the zones and %FTP "
+                    "targets follow). Ask the user, then call again with confirmed=true.")
+        result = _agent("/profile", {"write": changes}, timeout=90)
+    except (urllib.error.URLError, OSError) as e:
+        return "Not written. " + _agent_hint(e)
+    if not result.get("ok"):
+        return f"Write failed: {result.get('message')}. Check the profile with read_device_profile."
+    return f"Changed {shown}, read back from the device. " + profile_text(save_device_profile(result["profile"]))
 
 
 PACE_HELP = ("gpx_path (a .gpx file on this computer) or gpx_text; effort: very_light|light|moderate|hard|maximal (only "

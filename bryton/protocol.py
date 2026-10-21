@@ -341,3 +341,31 @@ def parse_body_item(frame):
 def _check_profile_frame(frame, min_len):
     if len(frame) < min_len or frame[1] != 0x01 or sum(frame[:-1]) & 0xFF != frame[-1]:
         raise ValueError(f"bad profile reply {bytes(frame).hex()}")
+
+
+def profile_write_frames(cmd, value, zones):
+    """The two frames the app sends to change FTP / max HR / LTHR (capture 2026-10-21, FTP 220 -> 221):
+    `<cmd> 01 00 <value u16 LE> <sum>` and `<cmd> 01 01 <zone limits u16 LE> ff ff <sum>`; the device answers
+    `<cmd> 0a` to each. The zones are sent back unchanged (the app does the same)."""
+    if cmd not in PROFILE_SCALARS or not 0 < value < 0xFFFF:
+        raise ValueError("cmd must be 0x21, 0x22 or 0x23 and the value 1..65534")
+    body = b"".join(int(z).to_bytes(2, "little") for z in zones) + b"\xff\xff"
+    return command(cmd, 0x01, 0, *int(value).to_bytes(2, "little")), command(cmd, 0x01, 1, *body)
+
+
+RESTING_CMD = 0x5A
+
+
+def parse_resting_hr(frame):
+    """`5a 01 <resting HR bpm> <u32 LE Unix time> <sum>` -> (bpm, Unix time). Inferred from ONE capture where the
+    device showed 60 bpm and the frame was `5a 01 3c ...`; the time is probably when the value was last changed (unsure)."""
+    _check_profile_frame(frame, 8)
+    return frame[2], int.from_bytes(frame[3:7], "little")
+
+
+def resting_write_frame(bpm, unix_time):
+    """`5a 01 <bpm> <u32 LE Unix time of the change> <sum>`: same layout as the read reply; written and read back on a
+    device (60 -> 62 -> 60). The device answers `5a 0a`."""
+    if not 20 <= bpm <= 150:
+        raise ValueError("resting heart rate 20..150")
+    return command(RESTING_CMD, 0x01, bpm, *int(unix_time).to_bytes(4, "little"))

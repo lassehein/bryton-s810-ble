@@ -47,7 +47,7 @@ def load_config():
         cfg = json.loads(CONFIG_FILE.read_text())
     except (OSError, ValueError):
         cfg = {}
-    cfg.update({k: v for k, v in load_device_profile().items() if k in ("ftp", "mhr", "lthr", "rider_kg") and v})
+    cfg.update({k: v for k, v in load_device_profile().items() if k in ("ftp", "mhr", "lthr", "rider_kg", "resting_hr") and v})
     return cfg
 
 
@@ -70,7 +70,8 @@ def profile_text(profile):
     def z(key):
         return "/".join(str(v) for v in profile.get(key, [])[1:]) or "?"
     return (f"FTP {profile['ftp']} W, max HR {profile['mhr']} bpm, LTHR {profile['lthr']} bpm, "
-            f"height {profile['height_cm']:g} cm, weight {profile['weight_kg']:g} kg (from the device). "
+            f"height {profile['height_cm']:g} cm, weight {profile['weight_kg']:g} kg"
+            + (f", resting HR {profile['resting_hr']} bpm" if profile.get("resting_hr") else "") + " (from the device). "
             f"Zone limits FTP % {z('ftp_zones')}; max HR % {z('mhr_zones')}; LTHR % {z('lthr_zones')}.")
 
 

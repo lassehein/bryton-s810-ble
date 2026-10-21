@@ -170,6 +170,7 @@ PROFILE_FRAMES = {  # as captured: request -> reply
     "230427": "23050100012a", "23020025": "2301009a00be",
     "23020126": "2301010000510058005d00640066006900ffff5c",
     "1e0422": "1e0501006f93", "1e02000020": "1e01000000002f43cdcc8942f5",
+    "5a045e": "5a0501000161", "5a025c": "5a013ceadc8e6a55",
     "1e02000121": "1e01000100008c42cd4c1a4364",
 }
 
@@ -199,7 +200,7 @@ def test_read_profile_from_fake_device(monkeypatch):
     install_fake_bleak(monkeypatch, ProfileDevice(b"x"))
     p = asyncio.run(read_profile(log=lambda line: None))
     assert (p["ftp"], p["mhr"], p["lthr"], p["height_cm"], p["weight_kg"]) == (220, 188, 154, 175.0, 70.0)
-    assert p["lthr_zones"] == [0, 81, 88, 93, 100, 102, 105]
+    assert p["lthr_zones"] == [0, 81, 88, 93, 100, 102, 105] and p["resting_hr"] == 60
 
 
 def test_read_profile_reports_silence(monkeypatch):
@@ -216,3 +217,105 @@ def test_read_profile_reports_silence(monkeypatch):
     monkeypatch.setattr(ble.time, "time", iter(range(0, 100000, 2)).__next__)  # make the 3 s deadline pass fast
     with pytest.raises(UploadError, match="no reply to 2204"):
         asyncio.run(read_profile(log=lambda line: None))
+
+
+# --- writing the profile -----------------------------------------------------------------------------
+class WritableDevice(ProfileDevice):
+    """Keeps FTP / zones like the S810: the app's write frames change what the read commands return."""
+
+    def __init__(self):
+        super().__init__(b"x")
+        self.frames = {k: bytes.fromhex(v) for k, v in PROFILE_FRAMES.items()}
+        self.ignore_writes = False
+
+    def on_write(self, uuid, data):
+        ch, h = CH[uuid], data.hex()
+        if ch == "0x18" and len(data) == 8 and data[:2] == b"\x5a\x01":  # resting HR: value, then the time
+            self.writes.append((ch, h))
+            reply = bytes([0x5A, 0x01, data[2]]) + data[3:7]
+            PROFILE_FRAMES["5a025c"] = (reply + bytes([sum(reply) & 0xFF])).hex()
+            self.notify(COMMAND_CHAR_UUID, bytes([0x5A, 0x0A]))
+            return
+        if ch == "0x18" and len(data) >= 6 and data[0] in (0x21, 0x22, 0x23) and data[1] == 0x01:
+            self.writes.append((ch, h))
+            if not self.ignore_writes and data[2] == 0:  # item 0 = the value
+                req = bytes([data[0], 0x02, 0])
+                key = (req + bytes([sum(req) & 0xFF])).hex()
+                reply = bytes([data[0], 0x01, 0]) + data[3:5]
+                PROFILE_FRAMES[key] = (reply + bytes([sum(reply) & 0xFF])).hex()
+            self.notify(COMMAND_CHAR_UUID, bytes([data[0], 0x0A]))
+            return
+        super().on_write(uuid, data)
+
+
+def test_write_profile_ftp_roundtrip(monkeypatch):
+    from bryton.ble import write_profile
+    saved = dict(PROFILE_FRAMES)
+    try:
+        dev = WritableDevice()
+        install_fake_bleak(monkeypatch, dev)
+        r = asyncio.run(write_profile({"ftp": 221}, log=lambda line: None))
+        assert r["before"]["ftp"] == 220 and r["after"]["ftp"] == 221
+        sent = [h for ch, h in dev.writes if ch == "0x18" and h.startswith("2101")]
+        assert sent == ["210100dd00ff", "21010100003700" + "4b005a00690078009600ffff74"]  # exactly the app's frames
+    finally:
+        PROFILE_FRAMES.clear()
+        PROFILE_FRAMES.update(saved)
+
+
+def test_write_profile_rejects_bad_values_and_failed_readback(monkeypatch):
+    from bryton.ble import UploadError, write_profile
+    saved = dict(PROFILE_FRAMES)
+    try:
+        install_fake_bleak(monkeypatch, WritableDevice())
+        for bad in ({"ftp": 10}, {"weight": 80}, {"lthr": 200}):  # out of range / unknown key / lthr >= mhr
+            with pytest.raises(UploadError):
+                asyncio.run(write_profile(bad, log=lambda line: None))
+        dev = WritableDevice()
+        dev.ignore_writes = True  # device acks but keeps the old value
+        install_fake_bleak(monkeypatch, dev)
+        with pytest.raises(UploadError, match="readback of ftp"):
+            asyncio.run(write_profile({"ftp": 230}, log=lambda line: None))
+        install_fake_bleak(monkeypatch, WritableDevice())  # unchanged value: nothing is sent
+        d2 = WritableDevice()
+        install_fake_bleak(monkeypatch, d2)
+        asyncio.run(write_profile({"ftp": 220}, log=lambda line: None))
+        assert not [h for ch, h in d2.writes if h.startswith("2101")]
+    finally:
+        PROFILE_FRAMES.clear()
+        PROFILE_FRAMES.update(saved)
+
+
+def test_resting_hr_frame_from_capture_and_optional(monkeypatch):
+    from bryton.protocol import parse_resting_hr
+    assert parse_resting_hr(bytes.fromhex("5a013ceadc8e6a55")) == (60, 1787747562)
+    from bryton.ble import read_profile
+    saved = dict(PROFILE_FRAMES)
+    try:
+        del PROFILE_FRAMES["5a045e"]  # a device that does not answer: the rest still works
+        install_fake_bleak(monkeypatch, ProfileDevice(b"x"))
+        import bryton.ble as ble
+        monkeypatch.setattr(ble.time, "time", iter(range(0, 10**6, 2)).__next__)
+        p = asyncio.run(read_profile(log=lambda line: None))
+        assert p["resting_hr"] is None and p["ftp"] == 220
+    finally:
+        PROFILE_FRAMES.clear()
+        PROFILE_FRAMES.update(saved)
+
+
+def test_write_resting_hr(monkeypatch):
+    from bryton.ble import write_profile
+    from bryton.protocol import resting_write_frame
+    assert resting_write_frame(62, 1792000000).hex() == "5a013e" + (1792000000).to_bytes(4, "little").hex() + hex(
+        (0x5A + 1 + 62 + sum((1792000000).to_bytes(4, "little"))) & 0xFF)[2:].zfill(2)
+    saved = dict(PROFILE_FRAMES)
+    try:
+        dev = WritableDevice()
+        install_fake_bleak(monkeypatch, dev)
+        r = asyncio.run(write_profile({"resting_hr": 62}, log=lambda line: None))
+        assert r["before"]["resting_hr"] == 60 and r["after"]["resting_hr"] == 62
+        sent = [h for ch, h in dev.writes if ch == "0x18" and h.startswith("5a01")]
+        assert len(sent) == 1 and sent[0].startswith("5a013e") and not [h for ch, h in dev.writes if h.startswith("2101")]
+    finally:
+        PROFILE_FRAMES.clear()
+        PROFILE_FRAMES.update(saved)

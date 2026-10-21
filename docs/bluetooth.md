@@ -137,3 +137,16 @@ Seen in a capture of the Bryton app syncing a finished ride. Everything is read-
 - A long ride arrives gzip-compressed, a short one (1858 bytes, 0.1 km) as a plain FIT file (starts with `0e 10`); decide by the first bytes (`1f 8b`). The FIT file is a normal FIT activity (`.FIT` header, Bryton manufacturer, session with power, heart rate, cadence, zones). The captured long ride had several thousand one-second records.
 - After the download the app sends `33 01 <id u32 little-endian> <sum>` on 0x18 and the device answers `33 0a`, probably marking the ride as synced. `bryton.ble.download_rides` never sends it.
 - Connecting also runs a profile sync before the download: `2f`, `34`, `47`, `41` (language), `5b`, `29`, `4a`, `53` (clock), `1d`/`1e` (user data) and `21`-`23` (FTP/MHR/LTHR with their zone limits). Only `2f 04` is needed for the download.
+
+The resting heart rate is read with `5a 04 5e` (-> `5a 05 01 00 01 61`) and `5a 02 5c`, which returns `5a 01 <bpm> <u32 LE Unix time> <sum>` (60 bpm and a time in August 2026 on the captured device). It is written with the same layout, `5a 01 <bpm> <u32 LE Unix time of the change> <sum>` (device answers `5a 0a`; 60 -> 62 -> 60 written and read back on a device).
+
+## Writing the rider profile
+
+To change the FTP the app sends two frames on 0x18 (capture of an FTP change 220 -> 221 W; no preceding query, the device answers each frame with `21 0a`):
+
+```
+0x18  21 01 00 <ftp u16 LE> <sum>                       FTP in watts               -> 21 0a
+0x18  21 01 01 <zone limits u16 LE ...> ff ff <sum>     FTP zones in % (unchanged: 0 55 75 90 105 120 150) -> 21 0a
+```
+
+Reading the value back (`21 04`, `21 02 00`) returns the new FTP. The frames have the same layout as the device's read replies. Max HR (`22`) and LTHR (`23`) work the same way (written and read back on a device); height and weight (`1e`) were not captured. `bryton.ble.write_profile` (FTP, max HR, LTHR, resting HR) reads the profile, writes the changed values with the zones unchanged, reads back and verifies.

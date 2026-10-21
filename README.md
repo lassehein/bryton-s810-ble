@@ -13,7 +13,7 @@ and plan them with Claude through an MCP server.
 - Targets per step: % FTP, % max HR, % LTHR, speed, cadence; fixed value or range; time or distance steps.
 - Workout descriptions, which the device displays.
 - **Routes from GPX files**, shown on the device under `Courses > Route`.
-- **Rider profile from the device:** FTP, max HR, LTHR and weight are read from the device and used for plans.
+- **Rider profile on the device:** FTP, max HR, LTHR, resting HR, height and weight are read and used for plans; FTP, max HR, LTHR and resting HR can be changed (MCP `write_device_profile`, shows the change first and asks).
 - **Download recorded rides** as FIT files (those the Bryton app has not fetched yet; read-only, the app can still sync them afterwards).
 - **Pace Pilot (experimental):** a pacing plan (target power per segment, nutrition) calculated for a GPX route and sent as the app does, from the MCP server (`preview_pace_plan`, `upload_pace_plan`) or with `tools/bryton_pace_test.py`. Wind and temperature can be given or taken from the Open-Meteo forecast; only the "moderate" effort level is calibrated.
 - Correct cadence ranges next to power/HR/speed targets (the device needs `target_high` before `target_low`, [details](docs/file-formats.md)).

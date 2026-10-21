@@ -219,7 +219,7 @@ def test_outdated_agent_is_refused(monkeypatch):
     with pytest.raises(mod.AgentOutdated):
         mod._agent("/upload", {"x": 1})
     assert "old Bluetooth agent" in mod.agent_status()
-    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 5})
+    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 6})
     assert mod.agent_status() == "Agent running"
 
 
@@ -413,3 +413,52 @@ def test_pace_with_given_wind_and_forecast(state, monkeypatch):
     monkeypatch.setattr(weather, "fetch_weather", broken)
     with pytest.raises(ServiceError, match="weather request failed"):
         build_pace("W4", gpx_text=gpx, rider_kg=75, bike_kg=8, ride_date="2026-10-25")
+
+
+def test_mcp_write_device_profile_needs_confirmation(monkeypatch, state):
+    import bryton.mcp_server as mod
+    calls = []
+    prof = {"ftp": 220, "mhr": 188, "lthr": 154, "ftp_zones": [0, 55], "mhr_zones": [0, 60], "lthr_zones": [0, 81],
+            "height_cm": 175.0, "weight_kg": 70.0, "resting_hr": 60}
+
+    def fake(path, payload=None, **k):
+        calls.append(payload)
+        if payload and payload.get("write"):
+            return {"ok": True, "profile": {**prof, **payload["write"]}, "before": prof}
+        return {"ok": True, "profile": prof}
+    monkeypatch.setattr(mod, "_agent", fake)
+    out = mod.write_device_profile(ftp=230)
+    assert out.startswith("Not written") and "FTP 220 -> 230" in out and not any(c.get("write") for c in calls if c)
+    assert mod.write_device_profile().startswith("Error") and mod.write_device_profile(ftp=5).startswith("Error")
+    assert mod.write_device_profile(lthr=190).startswith("Error: LTHR must be below")
+    assert "already has these values" in mod.write_device_profile(ftp=220, confirmed=True)
+    out = mod.write_device_profile(ftp=230, mhr=190, confirmed=True)
+    assert "FTP 220 -> 230" in out and "MHR 188 -> 190" in out and calls[-1] == {"write": {"ftp": 230, "mhr": 190}}
+    assert mod.load_config()["ftp"] == 230  # the remembered device profile follows
+    assert "RESTING_HR 60 -> 62" in mod.write_device_profile(resting_hr=62)
+    assert mod.write_device_profile(resting_hr=5).startswith("Error")
+
+
+def test_agent_profile_write_endpoint(state):
+    from http.server import ThreadingHTTPServer
+    from bryton import agent
+    seen = {}
+
+    async def fake_write(changes, log=print):
+        seen.update(changes)
+        return {"before": {"ftp": 220}, "after": {"ftp": changes["ftp"]}}
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler("secret", profile_writer=fake_write))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        def post(payload):
+            req = urllib.request.Request(url + "/profile", data=json.dumps(payload).encode(), headers={"X-Bryton-Token": "secret"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read())
+        assert post({"write": {"ftp": 230}}) == (200, {"ok": True, "profile": {"ftp": 230}, "before": {"ftp": 220}}) and seen == {"ftp": 230}
+        assert post({"write": {"ftp": "x"}})[0] == 400
+    finally:
+        srv.shutdown()

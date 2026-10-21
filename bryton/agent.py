@@ -14,10 +14,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from bryton.ble import UploadError, download_rides, list_rides, read_profile, upload_many, upload_pace, upload_route
+from bryton.ble import UploadError, download_rides, list_rides, read_profile, write_profile, upload_many, upload_pace, upload_route
 from bryton.service import RIDES_DIR, STATE_DIR, ride_filename
 
-AGENT_API = 5  # 1: workouts and calendar, 2: + routes, 3: + reading rides (/rides), 4: + Pace Pilot plans, 5: + reading the rider profile (/profile). The MCP server refuses an older running agent.
+AGENT_API = 6  # 1: workouts and calendar, 2: + routes, 3: + reading rides (/rides), 4: + Pace Pilot plans, 5: + reading the rider profile (/profile), 6: + writing FTP (/profile with "write"). The MCP server refuses an older running agent.
 HOST, PORT = "127.0.0.1", int(os.environ.get("BRYTON_AGENT_PORT", "8765"))
 TOKEN_FILE = STATE_DIR / "agent_token"
 LOG_DIR = STATE_DIR / "logs"
@@ -88,8 +88,9 @@ def run_rides(action, ids, lister=list_rides, downloader=download_rides):
         return {"ok": False, "message": f"{type(e).__name__}: {e}", "log": lines[-40:]}
 
 
-def run_profile(reader=read_profile):
-    """Read-only: FTP, max HR, LTHR, height and weight stored on the device."""
+def run_profile(reader=read_profile, changes=None, writer=write_profile):
+    """FTP, max HR, LTHR, height and weight stored on the device; with changes = {"ftp": 230, ...} they are written first
+    (read before, written, read back; returns before and after)."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     path = LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_profile.log"
     lines = []
@@ -99,6 +100,9 @@ def run_profile(reader=read_profile):
         with open(path, "a") as f:
             f.write(line + "\n")
     try:
+        if changes:
+            result = asyncio.run(writer(changes, log=log))
+            return {"ok": True, "profile": result["after"], "before": result["before"]}
         return {"ok": True, "profile": asyncio.run(reader(log=log))}
     except UploadError as e:
         return {"ok": False, "message": str(e), "log": lines[-40:]}
@@ -107,7 +111,8 @@ def run_profile(reader=read_profile):
 
 
 def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_lister=list_rides,
-                 ride_downloader=download_rides, pace_uploader=upload_pace, profile_reader=read_profile):
+                 ride_downloader=download_rides, pace_uploader=upload_pace, profile_reader=read_profile,
+                 profile_writer=write_profile):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, payload):
             body = json.dumps(payload).encode()
@@ -132,10 +137,15 @@ def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_
             if not secrets.compare_digest(self.headers.get("X-Bryton-Token", ""), token):
                 return self._send(403, {"ok": False, "message": "bad token"})
             if self.path == "/profile":
+                try:
+                    body = self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}"
+                    changes = {str(k): int(v) for k, v in (json.loads(body).get("write") or {}).items()}
+                except (ValueError, AttributeError) as e:
+                    return self._send(400, {"ok": False, "message": f"bad request: {e}"})
                 if not _lock.acquire(blocking=False):
                     return self._send(409, {"ok": False, "message": "another transfer is running"})
                 try:
-                    return self._send(200, run_profile(profile_reader))
+                    return self._send(200, run_profile(profile_reader, changes, profile_writer))
                 finally:
                     _lock.release()
             if self.path == "/rides":
