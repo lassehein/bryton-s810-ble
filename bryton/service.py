@@ -356,3 +356,17 @@ def route_refusal(name, name_confirmed_new, overwrite):
         return ("The route list of the device cannot be read over Bluetooth. Ask the user to confirm that no route "
                 f"named {name!r} exists on the S810 (Courses > Route), then call again with name_confirmed_new=true.")
     return None
+
+
+RIDES_DIR = STATE_DIR / "rides"
+
+
+def ride_filename(ride_id):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ride_id, timezone.utc).strftime("%Y%m%d-%H%M%S") + f"_{ride_id}.fit"
+
+
+def describe_ride(entry):
+    from datetime import datetime, timezone
+    start = datetime.fromtimestamp(entry["id"], timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return f"id {entry['id']}: {start}, {entry['moving_s'] // 60} min moving, {entry['distance_m'] / 1000:.1f} km"

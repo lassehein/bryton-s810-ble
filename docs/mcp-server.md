@@ -26,8 +26,8 @@ readable only by you).
 ```bash
 python3 -m venv ~/.venvs/bryton && source ~/.venvs/bryton/bin/activate
 pip install -e ".[mcp]"               # from a checkout of this repository
-# or straight from GitHub (replace OWNER; a private repository needs your GitHub login):
-pip install "bryton-s810-ble[mcp] @ git+https://github.com/OWNER/bryton-s810-ble.git"
+# or straight from GitHub:
+pip install "bryton-s810-ble[mcp] @ git+https://github.com/lassehein/bryton-s810-ble.git"
 ```
 
 Optional settings in `~/.bryton_s810/config.json` (used for the preview and for name safety):
@@ -73,6 +73,8 @@ automatic agent start should work there (untested). Otherwise start `bryton-agen
 | `remove_calendar_entry` | Remove a planned day and resend the calendar. |
 | `preview_route` | Check a GPX file and show distance, points and ascent. No device access. |
 | `upload_route` | Upload a GPX route; it appears under `Courses > Route` on the device. |
+| `list_rides` | List the rides on the device that the Bryton app has not fetched yet (read-only). |
+| `download_rides` | Save those rides as FIT files in `~/.bryton_s810/rides` (read-only, the app can still sync them). |
 | `list_known_routes` | Route names this server knows to be on the device. |
 | `agent_status` | Is the Bluetooth agent reachable? |
 
@@ -117,3 +119,10 @@ no Pace Pilot data; turn instructions and points of interest are not generated. 
 - *MCP server missing in Claude Desktop*: use the absolute path to the venv's `bryton-mcp`, then restart
   Claude Desktop completely (quit, not just close the window). Logs: `~/Library/Logs/Claude/mcp*.log`.
 - Agent log: `~/.bryton_s810/agent.log`, upload logs: `~/.bryton_s810/logs/`.
+
+### Rides
+
+`list_rides` and `download_rides` read finished rides over Bluetooth. They only see rides the Bryton app has not fetched
+yet; the transfer does not mark them as synced, so the app still gets them on its next sync. Files are saved to
+`~/.bryton_s810/rides/<UTC start>_<id>.fit` (heart rate, power and position data: keep them private). The phone's
+Bluetooth must be off and the device must not be connected via USB.

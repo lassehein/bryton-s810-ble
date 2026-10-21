@@ -4,11 +4,15 @@ Sequences as in the iPhone captures (bryton/protocol.py: plan_upload, plan_route
 Raises UploadError on any failure; never leaves the device in transfer mode (46 01 00).
 """
 import asyncio
+import contextlib
 import time
+import types
 
-from bryton.protocol import (COMMAND_CHAR_UUID, CONTROL_CHAR_UUID, FILE_CHAR_UUID, HANDSHAKE, ack_for,
+from bryton.protocol import (COMMAND_CHAR_UUID, CONTROL_CHAR_UUID, FILE_CHAR_UUID, HANDSHAKE, MAX_READ,
+                             INFO_GO, INFO_REQUEST, READ_GO, RIDE_LIST_EMPTY, RIDE_LIST_GO, RIDE_LIST_REQUEST, TransferReceiver, ack_for,
                              begin_transfer, build_chunks, build_query, build_transfer, end_transfer,
-                             plan_route_upload, plan_upload, reassemble, reply_seen)
+                             parse_ride_list, plan_pace_upload, plan_route_upload, plan_upload, read_request,
+                             reassemble, reply_seen)
 
 PACE = 0.002   # capture: ~1 ms between write-without-response packets
 MIN_MTU = 153  # 150-byte packets + 3 ATT header bytes
@@ -62,13 +66,22 @@ async def upload_route(payload, name, devname="rider", address=None, log=print):
     await run_steps(plan_route_upload(build_chunks(payload), name), devname, address, log)
 
 
-async def run_steps(steps, devname, address, log, begin=None, end=None):
-    """Connect, handshake and play `steps`; if begin was sent but not end, send end before leaving."""
+async def upload_pace(route_payload, report_json, name, devname="rider", address=None, log=print):
+    """Send a route with a Pace Pilot plan: route (gzip FIT, kind 1a), the name, the coach report (JSON, kind 1b)."""
+    steps = plan_pace_upload(build_chunks(route_payload), build_chunks(report_json), name)
+    await run_steps(steps, devname, address, log)
+
+
+@contextlib.asynccontextmanager
+async def _session(devname, address, log, preamble=False):
+    """Connect, enable notifications, handshake, `2f 04`. Yields an object with write(), expect(), seen, rx0d.
+
+    preamble=True also plays the app's `06 08` / `06 48 03` device-info exchange before returning."""
     from bleak import BleakClient
-    BEGIN_TRANSFER, END_TRANSFER = begin, end
     t0 = time.time()
     disconnected, handshake_ok = asyncio.Event(), asyncio.Event()
     seen = []
+    rx0d = asyncio.Queue()
 
     def emit(tag, data):
         log(f"{time.time() - t0:8.3f} {tag} {data.hex()}")
@@ -92,6 +105,11 @@ async def run_steps(steps, devname, address, log, begin=None, end=None):
         def on_notify(ch):
             def cb(_c, data):
                 data = bytes(data)
+                if ch == "0x0d":
+                    rx0d.put_nowait(data)
+                    if len(data) < 20:  # packet bodies are not logged
+                        emit(f"RX {ch}", data)
+                    return
                 emit(f"RX {ch}", data)
                 seen.append((ch, data))
                 if ch == "0x10" and data == bytes.fromhex("082802"):
@@ -106,6 +124,8 @@ async def run_steps(steps, devname, address, log, begin=None, end=None):
                 if reply_seen(seen, mark, name):
                     await asyncio.sleep(0.1)  # let the reactive ack go out first
                     return True
+                if disconnected.is_set():
+                    return False
                 await asyncio.sleep(0.02)
             return False
 
@@ -118,24 +138,105 @@ async def run_steps(steps, devname, address, log, begin=None, end=None):
             raise UploadError("no handshake reply (08 28 02), nothing sent") from None
         await write("0x18", build_query(0x2F), True)
         await asyncio.sleep(1.5)
+        s = types.SimpleNamespace(write=write, expect=expect, seen=seen, rx0d=rx0d, disconnected=disconnected)
+        if preamble:
+            await _receive(s, INFO_REQUEST, "info_ack", INFO_GO, timeout=10)
+        yield s
 
+
+async def run_steps(steps, devname, address, log, begin=None, end=None):
+    """Connect, handshake and play `steps`; if begin was sent but not end, send end before leaving."""
+    BEGIN_TRANSFER, END_TRANSFER = begin, end
+    async with _session(devname, address, log) as s:
         begun, end_sent, failed = False, False, None
         try:
             for ch, data, response, exp in steps:
-                mark = len(seen)  # before the write: the reply can arrive while the write is awaited
-                await write(ch, data, response)
+                mark = len(s.seen)  # before the write: the reply can arrive while the write is awaited
+                await s.write(ch, data, response)
                 begun = begun or (BEGIN_TRANSFER is not None and data == BEGIN_TRANSFER)
                 end_sent = end_sent or (END_TRANSFER is not None and data == END_TRANSFER)
                 if not response:
                     await asyncio.sleep(PACE)
-                if exp and not await expect(exp, 6 if exp == "done" else 3, mark):
+                if exp and not await s.expect(exp, 6 if exp == "done" else 3, mark):
                     failed = f"no reply '{exp}' after {data.hex()}"
                     break
         finally:
-            if begun and not end_sent and not disconnected.is_set():
-                mark = len(seen)
-                await write("0x18", END_TRANSFER, True)
-                await expect("ack46", 3, mark)
+            if begun and not end_sent and not s.disconnected.is_set():
+                mark = len(s.seen)
+                await s.write("0x18", END_TRANSFER, True)
+                await s.expect("ack46", 3, mark)
         await asyncio.sleep(2)
     if failed:
         raise UploadError(f"device rejected or did not answer: {failed}")
+
+
+async def _receive(s, request, reply, go, timeout=45, empty=None):
+    """Send `request` on 0x10, wait for `reply`, send `go`, collect one transfer from 0x0d; returns its body.
+    If the device answered with `empty` instead, nothing is requested and None is returned."""
+    while not s.rx0d.empty():  # leftovers of an earlier, failed transfer
+        s.rx0d.get_nowait()
+    mark = len(s.seen)
+    await s.write("0x10", request, True)
+    if not await s.expect(reply, 3, mark):
+        got = ", ".join(f"{ch}:{d.hex()}" for ch, d in s.seen[mark:][:6]) or "nothing"
+        raise UploadError(f"no reply '{reply}' after {request.hex()} (received: {got})")
+    if empty is not None and any(c == "0x10" and d == empty for c, d in s.seen[mark:]):
+        return None
+    await s.write("0x10", go, True)
+    rx = TransferReceiver()
+    deadline = time.time() + timeout
+    while True:
+        try:
+            value = await asyncio.wait_for(s.rx0d.get(), max(0.1, deadline - time.time()))
+        except asyncio.TimeoutError:
+            raise UploadError("transfer from the device timed out") from None
+        try:
+            body = rx.feed(value)
+        except ValueError as e:
+            raise UploadError(f"invalid transfer from the device: {e}") from None
+        if body is not None:
+            return body
+
+
+async def list_rides(devname="rider", address=None, log=print, preamble=False):
+    """Read-only: rides recorded on the device that the app has not fetched yet. [{"id", "moving_s", "distance_m"}]"""
+    async with _session(devname, address, log, preamble) as s:
+        body = await _receive(s, RIDE_LIST_REQUEST, "list_ack", RIDE_LIST_GO, empty=RIDE_LIST_EMPTY)
+        return parse_ride_list(body) if body else []
+
+
+async def download_rides(ride_ids=None, devname="rider", address=None, log=print, progress=None, preamble=False):
+    """Read-only: fetch rides as FIT files. ride_ids=None fetches every ride in the device list. Never sends
+    the app's `33` acknowledgement, so the rides stay in the device list for the app's own sync.
+    Returns [(entry, fit_bytes)]. progress(done_bytes, total_bytes) is optional."""
+    import gzip
+    out = []
+    async with _session(devname, address, log, preamble) as s:
+        body = await _receive(s, RIDE_LIST_REQUEST, "list_ack", RIDE_LIST_GO, empty=RIDE_LIST_EMPTY)
+        entries = parse_ride_list(body) if body else []
+        if ride_ids is not None:
+            entries = [e for e in entries if e["id"] in set(ride_ids)]
+        for e in entries:
+            first = await _receive(s, read_request(e["id"], 0, 4), "read_ack", READ_GO)
+            if len(first) < 4:
+                raise UploadError(f"ride {e['id']}: size reply too short")
+            total = int.from_bytes(first[:4], "big")
+            data = b""
+            while len(data) < total:
+                n = min(MAX_READ, total - len(data))
+                part = await _receive(s, read_request(e["id"], len(data), n), "read_ack", READ_GO)
+                if len(part) != n:
+                    raise UploadError(f"ride {e['id']}: expected {n} bytes at offset {len(data)}, got {len(part)}")
+                data += part
+                if progress:
+                    progress(len(data), total)
+            if data[:2] == b"\x1f\x8b":  # long rides arrive gzip-compressed, a short one (1858 bytes) as a plain FIT file
+                try:
+                    data = gzip.decompress(data)
+                except (OSError, EOFError) as err:
+                    raise UploadError(f"ride {e['id']}: not valid gzip data ({err})") from None
+            if data[8:12] != b".FIT":
+                raise UploadError(f"ride {e['id']}: not a FIT file (starts with {data[:12].hex()})")
+            out.append((e, data))
+        await asyncio.sleep(1)
+    return out

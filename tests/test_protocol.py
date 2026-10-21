@@ -117,3 +117,12 @@ def test_large_file_is_split_into_chunks_and_rejoined():
     assert MAX_CHUNK_PAYLOAD == 6922
     (kind, out, note), = list(assemble_files(extract_transfers(_frames_for(0x0B, chunks))))
     assert (kind, out, note) == (0x0B, data, "ok")
+
+
+def test_pace_upload_plan_order():
+    from bryton.protocol import build_chunks, plan_pace_upload
+    steps = plan_pace_upload(build_chunks(b"\x1f\x8b" + bytes(range(256)) * 60), build_chunks(b'{"a": 1}'), "Test_Pace")
+    kinds = [d.hex() for ch, d, _r, _e in steps if ch == "0x10" and len(d) == 3]
+    assert kinds == ["10001a"] * 3 + ["10001b"]  # route chunks, then the report
+    assert [i for i, (ch, d, _r, _e) in enumerate(steps) if ch == "0x18" and d.hex() == "310435"][0] < \
+        [i for i, (ch, d, _r, _e) in enumerate(steps) if d.hex() == "10001b"][0]  # the name goes before the report

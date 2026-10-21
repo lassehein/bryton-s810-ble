@@ -1,6 +1,6 @@
 """Bryton Rider S810 file-transfer framing on the file characteristic (0x0d).
 
-Layout (see HANDOFF.md):
+Layout (see docs/bluetooth.md):
   start packet : 00 00 00 <n_data_packets> <unknown> 10 08        (7 bytes)
   data packet  : <seq u16 BE, from 1> <up to 148 bytes>   (150 bytes on air)
                  body = 00 00 00 00 <file_len u32 BE> + file, split into chunks
@@ -137,7 +137,8 @@ def end_transfer(target="plan"):
 
 
 BEGIN_TRANSFER, END_TRANSFER = begin_transfer(), end_transfer()
-PREPARE = {"fit": bytes.fromhex("100009"), "json": bytes.fromhex("10000f"), "route": bytes.fromhex("10000b")}
+PREPARE = {"fit": bytes.fromhex("100009"), "json": bytes.fromhex("10000f"), "route": bytes.fromhex("10000b"),
+           "pace_route": bytes.fromhex("10001a"), "pace_report": bytes.fromhex("10001b")}
 PARAMS = bytes.fromhex("10400501f4")
 PREPARE_REPLY = bytes.fromhex("102002")
 DONE_REPLY = bytes.fromhex("1040030000")
@@ -178,21 +179,33 @@ def name_frames(name):
     return frames
 
 
-def plan_route_upload(chunks, name):
-    """Steps (as plan_upload) for a route: every chunk is prepared and sent as kind 0b, then the name."""
+def _chunk_steps(chunks, kind):
     steps = []
     for start, packets, end in chunks:
-        steps.append(("0x10", PREPARE["route"], True, "prep"))
+        steps.append(("0x10", PREPARE[kind], True, "prep"))
         steps.append(("0x10", PARAMS, True, None))
         steps.append(("0x0d", start, False, None))
         steps += [("0x0d", pk, False, None) for pk in packets]
         steps.append(("0x0d", end, True, "done"))
+    return steps
+
+
+def _name_steps(name):
     frames = name_frames(name)
-    steps.append(("0x18", QUERY_31, True, "q31"))
-    steps.append(("0x18", frames[0], True, "seq31_1"))
+    steps = [("0x18", QUERY_31, True, "q31"), ("0x18", frames[0], True, "seq31_1")]
     for i, frame in enumerate(frames[1:], 1):
         steps.append(("0x18", frame, True, f"seq31_{i + 1}" if i + 1 < len(frames) else "ack31"))
     return steps
+
+
+def plan_route_upload(chunks, name):
+    """Steps (as plan_upload) for a route: every chunk is prepared and sent as kind 0b, then the name."""
+    return _chunk_steps(chunks, "route") + _name_steps(name)
+
+
+def plan_pace_upload(route_chunks, report_chunks, name):
+    """Pace Pilot (capture 2026-10-17): route as kind 1a, then the name, then the coach report as kind 1b."""
+    return _chunk_steps(route_chunks, "pace_route") + _name_steps(name) + _chunk_steps(report_chunks, "pace_report")
 
 
 # Expected replies by name: (channel, predicate)
@@ -203,6 +216,9 @@ EXPECT = {
     "done": ("0x10", lambda d: d == DONE_REPLY),
     "q31": ("0x18", lambda d: d[:2] == b"\x31\x05"),
     "ack31": ("0x18", lambda d: d == b"\x31\x0a"),
+    "list_ack": ("0x10", lambda d: d in (RIDE_LIST_REPLY, RIDE_LIST_EMPTY)),
+    "read_ack": ("0x10", lambda d: d == READ_REPLY),
+    "info_ack": ("0x10", lambda d: d == INFO_REPLY),
 }
 for _i in range(1, 6):  # the device asks for the next name frame: 31 02 <i> <sum>
     EXPECT[f"seq31_{_i}"] = ("0x18", lambda d, _i=_i: d[:3] == bytes([0x31, 0x02, _i]))
@@ -216,3 +232,75 @@ def reply_seen(seen, mark, name):
     """
     channel, pred = EXPECT[name]
     return any(c == channel and pred(d) for c, d in seen[mark:])
+
+
+# --- Download of recorded rides (app sync, capture 2026-10-21) -------------------------------------
+# 0x10 `0b 08` -> `0b 28 02`, `0b 48 03`: the device sends the ride list on 0x0d.
+# 0x10 `11 08 <id u32 BE> 01 <offset u32> <length u32>` -> `11 28 02`, `11 48 05 01 f4`: the device
+# sends that byte range of the (gzip-compressed) ride FIT on 0x0d. The id is the Unix start time.
+# The app then sends `33 01 <id u32 LE> <sum>` on 0x18; that is NOT sent here (see docs/bluetooth.md).
+RIDE_LIST_REQUEST = bytes.fromhex("0b08")
+RIDE_LIST_REPLY = bytes.fromhex("0b2802")
+RIDE_LIST_GO = bytes.fromhex("0b4803")
+RIDE_LIST_EMPTY = bytes.fromhex("0b2806")  # answer when no ride is waiting (seen with the app's rides all synced; unsure)
+READ_REPLY = bytes.fromhex("112802")
+INFO_REQUEST = bytes.fromhex("0608")   # the app sends these two right after the handshake; the device then sends
+INFO_REPLY = bytes.fromhex("062802")   # serial number, firmware and model on 0x0d
+INFO_GO = bytes.fromhex("064803")
+READ_GO = bytes.fromhex("11480501f4")
+MAX_READ = 0x9AB0  # largest byte range the app asks for in one read (39600)
+ENTRY_LEN = 18
+
+
+def read_request(ride_id, offset, length):
+    return b"\x11\x08" + struct.pack(">IBII", ride_id, 1, offset, length)
+
+
+class TransferReceiver:
+    """Collects one device -> phone transfer from 0x0d notifications.
+
+    start `00 00 <n u16 BE> <last len> <tag..>`, then n packets `<seq u16 BE> <data>` and an end packet
+    `<n+1 u16 BE> 00 <u32 BE sum of the body>`. feed() returns the body bytes once complete, else None.
+    """
+
+    def __init__(self):
+        self.n = None
+        self.packets = []
+
+    def feed(self, value):
+        value = bytes(value)
+        if self.n is None:
+            if len(value) < 5 or value[:2] != b"\x00\x00":
+                raise ValueError(f"bad start packet {value.hex()}")
+            self.n = struct.unpack(">H", value[2:4])[0]
+            self.packets = []
+            return None
+        if len(self.packets) < self.n:
+            if struct.unpack(">H", value[:2])[0] != len(self.packets) + 1:
+                raise ValueError(f"bad sequence number in packet {len(self.packets) + 1}")
+            self.packets.append(value[2:])
+            return None
+        body = b"".join(self.packets)
+        if len(value) != 7 or struct.unpack(">H", value[:2])[0] != self.n + 1:
+            raise ValueError("bad end packet")
+        if struct.unpack(">I", value[3:])[0] != sum(body) & 0xFFFFFFFF:
+            raise ValueError("end packet checksum mismatch")
+        self.n = None
+        return body
+
+
+def parse_ride_list(body):
+    """-> [{"id", "moving_s", "distance_m"}] from the ride list body.
+
+    Seen with ONE ride (36 bytes): `13 <id u32> <moving time s u32> <distance m u32> 00 00 00 00 00` followed by
+    `02` and zeros. Entries are read in steps of 18 bytes while the first byte is 0x13; with several rides the
+    stride and the meaning of 0x13 / 0x02 are a guess (unsure).
+    """
+    out = []
+    for i in range(0, len(body) - ENTRY_LEN + 1, ENTRY_LEN):
+        e = body[i:i + ENTRY_LEN]
+        if e[0] != 0x13:
+            break
+        ride_id, moving, dist = struct.unpack(">III", e[1:13])
+        out.append({"id": ride_id, "moving_s": moving, "distance_m": dist})
+    return out

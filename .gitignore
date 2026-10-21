@@ -12,3 +12,5 @@ write.log
 build/
 dist/
 .DS_Store
+rides/
+*.fit.gz

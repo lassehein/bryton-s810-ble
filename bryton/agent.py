@@ -14,10 +14,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from bryton.ble import UploadError, upload_many, upload_route
-from bryton.service import STATE_DIR
+from bryton.ble import UploadError, download_rides, list_rides, upload_many, upload_route
+from bryton.service import RIDES_DIR, STATE_DIR, ride_filename
 
-AGENT_API = 2  # 1: workouts and calendar, 2: + routes. The MCP server refuses an older running agent.
+AGENT_API = 3  # 1: workouts and calendar, 2: + routes, 3: + reading rides (/rides). The MCP server refuses an older running agent.
 HOST, PORT = "127.0.0.1", int(os.environ.get("BRYTON_AGENT_PORT", "8765"))
 TOKEN_FILE = STATE_DIR / "agent_token"
 LOG_DIR = STATE_DIR / "logs"
@@ -55,7 +55,35 @@ def run_upload(workouts, name, uploader=upload_many, target="plan", route_payloa
         return {"ok": False, "message": f"{type(e).__name__}: {e}", "log": lines[-60:]}
 
 
-def make_handler(token, uploader=upload_many, route_uploader=upload_route):
+def run_rides(action, ids, lister=list_rides, downloader=download_rides):
+    """Read-only: list the rides waiting on the device, or download them into RIDES_DIR."""
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOG_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}_rides.log"
+    lines = []
+
+    def log(line):
+        lines.append(line)
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    try:
+        if action == "list":
+            return {"ok": True, "rides": asyncio.run(lister(log=log))}
+        got = asyncio.run(downloader(ids or None, log=log))
+        RIDES_DIR.mkdir(parents=True, exist_ok=True)
+        rides = []
+        for entry, fit in got:
+            target = RIDES_DIR / ride_filename(entry["id"])
+            target.write_bytes(fit)
+            rides.append({**entry, "path": str(target), "bytes": len(fit)})
+        return {"ok": True, "rides": rides}
+    except UploadError as e:
+        return {"ok": False, "message": str(e), "log": lines[-40:]}
+    except Exception as e:  # bleak/CoreBluetooth errors
+        return {"ok": False, "message": f"{type(e).__name__}: {e}", "log": lines[-40:]}
+
+
+def make_handler(token, uploader=upload_many, route_uploader=upload_route, ride_lister=list_rides,
+                 ride_downloader=download_rides):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, payload):
             body = json.dumps(payload).encode()
@@ -75,10 +103,25 @@ def make_handler(token, uploader=upload_many, route_uploader=upload_route):
                 self._send(404, {"ok": False, "message": "not found"})
 
         def do_POST(self):
-            if self.path != "/upload":
+            if self.path not in ("/upload", "/rides"):
                 return self._send(404, {"ok": False, "message": "not found"})
             if not secrets.compare_digest(self.headers.get("X-Bryton-Token", ""), token):
                 return self._send(403, {"ok": False, "message": "bad token"})
+            if self.path == "/rides":
+                try:
+                    req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+                    action = req["action"]
+                    ids = [int(i) for i in req.get("ids") or []]
+                    if action not in ("list", "download"):
+                        raise ValueError(f"unknown action {action!r}")
+                except (ValueError, KeyError) as e:
+                    return self._send(400, {"ok": False, "message": f"bad request: {e}"})
+                if not _lock.acquire(blocking=False):
+                    return self._send(409, {"ok": False, "message": "another transfer is running"})
+                try:
+                    return self._send(200, run_rides(action, ids, ride_lister, ride_downloader))
+                finally:
+                    _lock.release()
             try:
                 req = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
                 name = str(req["name"])

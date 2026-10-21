@@ -218,7 +218,7 @@ def test_outdated_agent_is_refused(monkeypatch):
     with pytest.raises(mod.AgentOutdated):
         mod._agent("/upload", {"x": 1})
     assert "old Bluetooth agent" in mod.agent_status()
-    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 2})
+    monkeypatch.setattr(mod, "_raw_agent", lambda path, payload=None, timeout=150: {"ok": True, "busy": False, "api": 3})
     assert mod.agent_status() == "Agent running"
 
 
@@ -228,3 +228,54 @@ def test_route_warns_without_elevation():
     payload, info = build_route("Flat", gpx_text=flat)
     assert info["flat"] and "no <ele>" in route_text("Flat", info)
     assert "no <ele>" not in route_text("Hilly", build_route("Hilly", gpx_text=GPX)[1])
+
+
+def test_agent_rides_list_and_download(state, monkeypatch):
+    from http.server import ThreadingHTTPServer
+    from bryton import agent, service
+    monkeypatch.setattr(agent, "RIDES_DIR", service.STATE_DIR / "rides")
+    entry = {"id": 1700000000, "moving_s": 60, "distance_m": 1000}
+    seen = {}
+
+    async def fake_list(log=print):
+        return [entry]
+
+    async def fake_download(ids, log=print):
+        seen["ids"] = ids
+        return [(entry, b"\x0e\x10\x00\x00\x00\x00\x00\x00.FIT")]
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), agent.make_handler("secret", ride_lister=fake_list, ride_downloader=fake_download))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def post(payload, token="secret"):
+        req = urllib.request.Request(url + "/rides", data=json.dumps(payload).encode(),
+                                     headers={"Content-Type": "application/json", "X-Bryton-Token": token})
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+    try:
+        assert post({"action": "list"}, "wrong")[0] == 403
+        assert post({"action": "delete"})[0] == 400
+        assert post({"action": "list"})[1]["rides"] == [entry]
+        code, body = post({"action": "download", "ids": [1700000000]})
+        assert code == 200 and seen["ids"] == [1700000000]
+        saved = service.STATE_DIR / "rides" / "20231114-221320_1700000000.fit"
+        assert body["rides"][0]["path"] == str(saved) and saved.read_bytes()[8:12] == b".FIT"
+    finally:
+        srv.shutdown()
+
+
+def test_mcp_ride_tools(monkeypatch, state):
+    import bryton.mcp_server as mod
+    entry = {"id": 1700000000, "moving_s": 3600, "distance_m": 25000}
+    monkeypatch.setattr(mod, "_agent", lambda path, payload=None, **k: {"ok": True, "rides": [entry]} if payload["action"] == "list"
+                        else {"ok": True, "rides": [{**entry, "path": "/x/a.fit", "bytes": 5}]})
+    assert "60 min moving, 25.0 km" in mod.list_rides()
+    assert "/x/a.fit" in mod.download_rides([])
+    monkeypatch.setattr(mod, "_agent", lambda *a, **k: {"ok": True, "rides": []})
+    assert "No rides" in mod.list_rides() and "No matching rides" in mod.download_rides([])
+    monkeypatch.setattr(mod, "_agent", lambda *a, **k: {"ok": False, "message": "boom"})
+    assert "boom" in mod.list_rides() and "boom" in mod.download_rides([])

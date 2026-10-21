@@ -14,7 +14,7 @@ import urllib.error
 import urllib.request
 
 from bryton.service import (STATE_DIR, ServiceError, build, build_route, calendar_entries, calendar_save,
-                            calendar_text, calendar_with, calendar_without, known_names, known_routes,
+                            calendar_text, calendar_with, calendar_without, describe_ride, known_names, known_routes,
                             load_config, preview_text, remember_name, remember_route, resolve_date,
                             route_refusal, route_text, upload_refusal)
 
@@ -36,6 +36,7 @@ app disappear. Tell the user once and pass calendar_replace_ok=true after they a
 the workout goes into the workout list.
 Routes: preview_route / upload_route take a GPX file (gpx_path); they appear on the device under Courses > Route and
 the route list cannot be read, so ask whether the name is new (name_confirmed_new) before uploading.
+Rides: list_rides / download_rides read finished rides the Bryton app has not fetched yet (read-only, saved as FIT files).
 Never upload without the user's explicit go-ahead."""
 
 STEPS_HELP = """steps: list of {"kind": "warmup|active|rest|cooldown", duration: one of "minutes", "seconds",
@@ -81,7 +82,7 @@ def _start_agent():
     return False
 
 
-AGENT_API_REQUIRED = 2  # bryton.agent.AGENT_API: 2 = routes supported
+AGENT_API_REQUIRED = 3  # bryton.agent.AGENT_API: 2 = routes, 3 = reading rides
 
 
 class AgentOutdated(OSError):
@@ -259,6 +260,36 @@ def upload_route(name: str, gpx_path: str = "", gpx_text: str = "", name_confirm
         return f"Upload failed: {result.get('message')}. Nothing was changed on the device."
     remember_route(name)
     return f"{result['message']}.\n" + route_text(name, info)
+
+
+RIDES_HELP = ("Rides recorded on the S810 that the Bryton app has not fetched yet. Read-only: nothing is changed or "
+              "deleted on the device, and the app can still sync them afterwards. The phone's Bluetooth must be "
+              "off and the S810 not connected via USB.")
+
+
+@server.tool(description="List the rides waiting on the S810 (start time, moving time, distance). " + RIDES_HELP)
+def list_rides() -> str:
+    try:
+        result = _agent("/rides", {"action": "list"}, timeout=120)
+    except (urllib.error.URLError, OSError) as e:
+        return "Not read. " + _agent_hint(e)
+    if not result.get("ok"):
+        return f"Could not read the ride list: {result.get('message')}."
+    return "\n".join(describe_ride(r) for r in result["rides"]) or "No rides are waiting on the device."
+
+
+@server.tool(description="Download the rides waiting on the S810 as FIT files into ~/.bryton_s810/rides (all, or only "
+                         "the ride_ids given, ids from list_rides). Returns the file paths. " + RIDES_HELP)
+def download_rides(ride_ids: list[int] = []) -> str:
+    try:
+        result = _agent("/rides", {"action": "download", "ids": ride_ids}, timeout=600)
+    except (urllib.error.URLError, OSError) as e:
+        return "Not downloaded. " + _agent_hint(e)
+    if not result.get("ok"):
+        return f"Download failed: {result.get('message')}."
+    if not result["rides"]:
+        return "No matching rides are waiting on the device."
+    return "\n".join(f"{describe_ride(r)} -> {r['path']} ({r['bytes']} bytes)" for r in result["rides"])
 
 
 @server.tool(description="Route names this server knows to be on the S810 (uploaded through it, or listed in "

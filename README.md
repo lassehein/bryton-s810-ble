@@ -13,11 +13,13 @@ and plan them with Claude through an MCP server.
 - Targets per step: % FTP, % max HR, % LTHR, speed, cadence; fixed value or range; time or distance steps.
 - Workout descriptions, which the device displays.
 - **Routes from GPX files**, shown on the device under `Courses > Route`.
+- **Download recorded rides** as FIT files (those the Bryton app has not fetched yet; read-only, the app can still sync them afterwards).
+- **Pace Pilot (experimental):** a pacing plan (target power per segment, nutrition) calculated for a route and sent as the app does: `tools/bryton_pace_test.py`. Not yet part of the MCP server.
 - Correct cadence ranges next to power/HR/speed targets (the device needs `target_high` before `target_low`, [details](docs/file-formats.md)).
 - An **MCP server** so Claude Desktop / Claude Code can turn "4x4 minutes at 110-120 % FTP" into a workout and upload it
   after you confirm.
 
-Not supported: reading the workout or route list over Bluetooth, deleting workouts or routes, absolute watt/bpm targets, Pace Pilot plans, turn-by-turn instructions in routes.
+Not supported: reading the workout or route list over Bluetooth, deleting workouts or routes, absolute watt/bpm targets, turn-by-turn instructions in routes.
 
 ## Install
 
@@ -25,7 +27,7 @@ Not supported: reading the workout or route list over Bluetooth, deleting workou
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[mcp]"          # from a checkout; bleak is always installed, mcp only for the MCP server
 # or directly from GitHub:
-pip install "bryton-s810-ble[mcp] @ git+https://github.com/OWNER/bryton-s810-ble.git"
+pip install "bryton-s810-ble[mcp] @ git+https://github.com/lassehein/bryton-s810-ble.git"
 ```
 
 Needs Python 3.10+. Tested on macOS (Bluetooth via CoreBluetooth); other platforms are untested.

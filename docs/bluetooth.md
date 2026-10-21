@@ -117,3 +117,23 @@ shows up over USB mass storage; the device cannot be uploaded to over Bluetooth 
 - Uploading a name that exists replaces that workout without a prompt.
 - The device list cannot be read over Bluetooth. Keep your own list, or look at the USB drive.
 - Back up `System/Plan/Cycling/` and `Workout/` over USB before experimenting.
+
+
+## Ride download (app sync)
+
+Seen in a capture of the Bryton app syncing a finished ride. Everything is read-only until the app's final acknowledgement.
+
+```
+0x10  0b 08                               -> 0b 28 02      list the rides the app has not fetched yet
+0x10  0b 48 03                            -> the device sends the list on 0x0d (36 bytes for one ride)
+                                             (with no ride waiting, `0b 08` is answered with `0b 28 06` instead, unsure)
+0x10  11 08 <id u32> 01 <offset u32> <length u32>  -> 11 28 02   read a byte range of ride <id>
+0x10  11 48 05 01 f4                      -> the device sends the range on 0x0d
+```
+
+- The list entry holds the ride id (Unix start time), moving time in seconds and distance in metres: `13 <id> <time> <dist> 00 00 00 00 00`, followed by `02` and padding. Only one ride was captured, so the stride and the meaning of `13` / `02` are unsure.
+- A device -> phone transfer on 0x0d is framed like an upload, but the start packet carries the packet count as u16: `00 00 <n u16> <last length> <tag>`, then packets `<seq u16> <data>` and an end packet `<n+1 u16> 00 <sum32>`. There is no offset/length header in the body.
+- The first read (`offset 0, length 4`) answers with the total size of the file (u32) plus 14 bytes of file data. The app then reads in ranges of at most `0x9ab0` (39600) bytes; ranges of 39600 + 39600 + 3773 made up an 82973-byte file.
+- A long ride arrives gzip-compressed, a short one (1858 bytes, 0.1 km) as a plain FIT file (starts with `0e 10`); decide by the first bytes (`1f 8b`). The FIT file is a normal FIT activity (`.FIT` header, Bryton manufacturer, session with power, heart rate, cadence, zones). In the capture it had 8634 records for an indoor ride of 8606 s.
+- After the download the app sends `33 01 <id u32 little-endian> <sum>` on 0x18 and the device answers `33 0a`, probably marking the ride as synced. `bryton.ble.download_rides` never sends it.
+- Connecting also runs a profile sync before the download: `2f`, `34`, `47`, `41` (language), `5b`, `29`, `4a`, `53` (clock), `1d`/`1e` (user data) and `21`-`23` (FTP/MHR/LTHR with their zone limits). Only `2f 04` is needed for the download.

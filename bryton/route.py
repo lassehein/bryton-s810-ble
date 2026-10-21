@@ -78,10 +78,12 @@ def _distance_m(a, b):
     return math.hypot((b[0] - a[0]) * 0.111195, (b[1] - a[1]) * 0.111195 * math.cos(mid))
 
 
-def encode_fit(points, waypoints=(), climbs=(), summary=None, markers=None):
+def encode_fit(points, waypoints=(), climbs=(), summary=None, markers=None, segment_ends=(), version=True):
     """points: [(lat_deg, lon_deg, alt_m)]; waypoints: [(point_index, name)]; climbs: [(start, end)] indices.
 
     markers: (start name, end name): adds the two type-250 entries the app writes for planned routes.
+    segment_ends: point indices where a Pace Pilot segment ends (waypoint type 150); with version=False the
+    file has no message 248, as in the Pace Pilot route (kind 1a).
     summary overrides the computed values (used by the round-trip test)."""
     if not 2 <= len(points) <= MAX_POINTS:
         raise RouteError(f"need 2..{MAX_POINTS} points, got {len(points)}")
@@ -114,8 +116,10 @@ def encode_fit(points, waypoints=(), climbs=(), summary=None, markers=None):
     waypoint_rows += [(idx, 100, round(cum[idx]), 0, name) for idx, name in waypoints]
     if markers:
         waypoint_rows += [(0, 250, 0, 0, markers[0]), (len(pts) - 1, 250, round(cum[-1]), 0, markers[1])]
+    waypoint_rows += [(idx, 150, 0, 0, "") for idx in segment_ends]
     out = bytearray()
-    out += _definition(248) + _record(248, 0, 1)
+    if version:
+        out += _definition(248) + _record(248, 0, 1)
     out += _definition(254) + _record(254, len(pts), s["lat_max"], s["lat_min"], s["lon_max"], s["lon_min"],
                                        s["distance"], s["alt_max"], s["alt_min"], s["ascent"], s["descent"])
     out += _definition(251) + b"".join(_record(251, i) for i in range(len(pts)))

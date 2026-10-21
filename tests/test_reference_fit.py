@@ -49,5 +49,5 @@ def test_step_structure():
 
 
 def test_power_percent_target_type():
-    # target_type 245 = power in % FTP (see HANDOFF.md)
+    # target_type 245 = power in % FTP (see docs/file-formats.md)
     assert all(x[3] == b"\xf5" for x in steps())

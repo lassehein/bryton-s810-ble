@@ -114,17 +114,35 @@ def adv_reports(event):
 
 
 def att_frames(records):
-    """Yield (t, direction, att_pdu) for ATT (CID 4) frames in ACL records."""
+    """Yield (t, direction, att_pdu) for ATT (CID 4) frames in ACL records.
+
+    Fragmented L2CAP packets (ACL continuation fragments) are reassembled per direction and connection.
+    """
+    pending = {}  # (typ, handle) -> [t, bytearray]
     for secs, usecs, typ, p in records:
-        if typ not in (PKLG_ACL_TX, PKLG_ACL_RX) or len(p) < 8:
+        if typ not in (PKLG_ACL_TX, PKLG_ACL_RX) or len(p) < 4:
             continue
+        hw = struct.unpack("<H", p[:2])[0]
+        handle, pb = hw & 0x0FFF, (hw >> 12) & 3
         hlen = struct.unpack("<H", p[2:4])[0]
-        acl = p[4:4 + hlen]
-        if len(acl) < 4:
+        chunk = p[4:4 + hlen]
+        key = (typ, handle)
+        t = secs + usecs / 1e6
+        if pb == 1:  # continuation
+            if key not in pending:
+                continue
+            pending[key][1] += chunk
+        else:
+            pending[key] = [t, bytearray(chunk)]
+        t0, buf = pending[key]
+        if len(buf) < 4:
             continue
-        l2len, cid = struct.unpack("<HH", acl[:4])
+        l2len, cid = struct.unpack("<HH", bytes(buf[:4]))
+        if len(buf) < 4 + l2len:
+            continue
+        del pending[key]
         if cid == 4:
-            yield secs + usecs / 1e6, "TX" if typ == PKLG_ACL_TX else "RX", acl[4:4 + l2len]
+            yield t0, "TX" if typ == PKLG_ACL_TX else "RX", bytes(buf[4:4 + l2len])
 
 
 def gatt_table(frames):
